@@ -1,0 +1,98 @@
+{
+  "version": 3,
+  "targets": {
+    ".NETFramework,Version=v4.8": {
+      "TeklaSectionClassifier/1.0.0": {
+        "type": "project",
+        "framework": ".NETFramework,Version=v4.8",
+        "compile": {
+          "bin/placeholder/TeklaSectionClassifier.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/TeklaSectionClassifier.dll": {}
+        }
+      }
+    },
+    ".NETFramework,Version=v4.8/win-x86": {
+      "TeklaSectionClassifier/1.0.0": {
+        "type": "project",
+        "framework": ".NETFramework,Version=v4.8",
+        "compile": {
+          "bin/placeholder/TeklaSectionClassifier.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/TeklaSectionClassifier.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "TeklaSectionClassifier/1.0.0": {
+      "type": "project",
+      "path": "../TeklaSectionClassifier/TeklaSectionClassifier.csproj",
+      "msbuildProject": "../TeklaSectionClassifier/TeklaSectionClassifier.csproj"
+    }
+  },
+  "projectFileDependencyGroups": {
+    ".NETFramework,Version=v4.8": [
+      "TeklaSectionClassifier >= 1.0.0"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\Administrator\\.nuget\\packages\\": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "I:\\xingcaisuanfa\\TeklaSectionClassifier.Runner\\TeklaSectionClassifier.Runner.csproj",
+      "projectName": "TeklaSectionClassifier.Runner",
+      "projectPath": "I:\\xingcaisuanfa\\TeklaSectionClassifier.Runner\\TeklaSectionClassifier.Runner.csproj",
+      "packagesPath": "C:\\Users\\Administrator\\.nuget\\packages\\",
+      "outputPath": "I:\\xingcaisuanfa\\TeklaSectionClassifier.Runner\\obj\\",
+      "projectStyle": "PackageReference",
+      "configFilePaths": [
+        "C:\\Users\\Administrator\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+      ],
+      "originalTargetFrameworks": [
+        "net48"
+      ],
+      "sources": {
+        "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net48": {
+          "targetAlias": "net48",
+          "projectReferences": {
+            "I:\\xingcaisuanfa\\TeklaSectionClassifier\\TeklaSectionClassifier.csproj": {
+              "projectPath": "I:\\xingcaisuanfa\\TeklaSectionClassifier\\TeklaSectionClassifier.csproj"
+            }
+          }
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      },
+      "SdkAnalysisLevel": "9.0.300"
+    },
+    "frameworks": {
+      "net48": {
+        "targetAlias": "net48",
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.306\\RuntimeIdentifierGraph.json"
+      }
+    },
+    "runtimes": {
+      "win-x86": {
+        "#import": []
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\obj\Debug\net48\TeklaSectionClassifier.Runner.csproj.AssemblyReference.cache
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\obj\Debug\net48\TeklaSectionClassifier.Runner.GeneratedMSBuildEditorConfig.editorconfig
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\obj\Debug\net48\TeklaSectionClassifier.Runner.csproj.CoreCompileInputs.cache
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\bin\Debug\net48\TeklaSectionClassifier.Runner.exe.config
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\bin\Debug\net48\TeklaSectionClassifier.Runner.exe
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\bin\Debug\net48\TeklaSectionClassifier.Runner.pdb
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\bin\Debug\net48\TeklaSectionClassifier.dll
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\bin\Debug\net48\TeklaSectionClassifier.pdb
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\obj\Debug\net48\TeklaSec.9AF65C37.Up2Date
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\obj\Debug\net48\TeklaSectionClassifier.Runner.exe
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\obj\Debug\net48\TeklaSectionClassifier.Runner.pdb
+I:\xingcaisuanfa\TeklaSectionClassifier.Runner\obj\Debug\net48\TeklaSectionClassifier.Runner.exe.config

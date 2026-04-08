@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <RootNamespace>TeklaSectionClassifier</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Tekla.Structures">
+      <HintPath>D:\Program Files\Tekla Structures\2017\nt\bin\plugins\Tekla.Structures.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Tekla.Structures.Model">
+      <HintPath>D:\Program Files\Tekla Structures\2017\nt\bin\plugins\Tekla.Structures.Model.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

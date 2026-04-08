@@ -1,0 +1,7 @@
+I:\xingcaisuanfa\TeklaSectionClassifier\obj\Debug\net48\TeklaSectionClassifier.csproj.AssemblyReference.cache
+I:\xingcaisuanfa\TeklaSectionClassifier\obj\Debug\net48\TeklaSectionClassifier.GeneratedMSBuildEditorConfig.editorconfig
+I:\xingcaisuanfa\TeklaSectionClassifier\obj\Debug\net48\TeklaSectionClassifier.csproj.CoreCompileInputs.cache
+I:\xingcaisuanfa\TeklaSectionClassifier\bin\Debug\net48\TeklaSectionClassifier.dll
+I:\xingcaisuanfa\TeklaSectionClassifier\bin\Debug\net48\TeklaSectionClassifier.pdb
+I:\xingcaisuanfa\TeklaSectionClassifier\obj\Debug\net48\TeklaSectionClassifier.dll
+I:\xingcaisuanfa\TeklaSectionClassifier\obj\Debug\net48\TeklaSectionClassifier.pdb
