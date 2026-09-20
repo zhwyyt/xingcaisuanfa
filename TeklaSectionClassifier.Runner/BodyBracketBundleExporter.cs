@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -13,6 +14,15 @@ namespace TeklaSectionClassifier.Runner;
 
 internal static class BodyBracketBundleExporter
 {
+    private const string ExporterVersion = "xingcai-runner-body-bracket-0.3.3-index-once";
+
+    private sealed class PartObjectCache
+    {
+        public List<BooleanPart> Booleans { get; } = new List<BooleanPart>();
+        public List<BoltGroup> Bolts { get; } = new List<BoltGroup>();
+        public List<BaseWeld> Welds { get; } = new List<BaseWeld>();
+    }
+
     public static string Write(Model model, string outputDirectory)
     {
         Directory.CreateDirectory(outputDirectory);
@@ -23,6 +33,49 @@ internal static class BodyBracketBundleExporter
             throw new InvalidOperationException("没有从当前选择集中解析出可导出的 assembly。请先在 Tekla 中选择 assembly 或属于该 assembly 的零件。");
         }
 
+        Console.WriteLine("开始导出 Body/Bracket Bundle: " + assemblies.Count.ToString(CultureInfo.InvariantCulture) + " 根装配");
+        Console.Out.Flush();
+
+        var indexWatch = Stopwatch.StartNew();
+        var bevelByFather = IndexBevelObjectsByFather(model);
+        indexWatch.Stop();
+        Console.WriteLine(
+            "剖口对象索引完成: " +
+            bevelByFather.Count.ToString(CultureInfo.InvariantCulture) +
+            " 个父零件，耗时 " +
+            indexWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
+            "s");
+        Console.Out.Flush();
+
+        var ordered = assemblies.OrderBy(assembly => assembly.Identifier.ID).ToList();
+        var exported = new List<ExportedAssembly>();
+        var exportWatch = Stopwatch.StartNew();
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var assembly = ordered[i];
+            var item = BuildAssemblyExport(model, assembly, bevelByFather);
+            if (item != null)
+            {
+                exported.Add(item);
+            }
+
+            var count = i + 1;
+            if (count == 1 || count % 10 == 0 || count == ordered.Count)
+            {
+                var label = item != null && item.Metadata != null && !string.IsNullOrWhiteSpace(item.Metadata.AssemblyPosition)
+                    ? item.Metadata.AssemblyPosition
+                    : assembly.Identifier.ID.ToString(CultureInfo.InvariantCulture);
+                Console.WriteLine(
+                    "Bundle进度: 已处理 " +
+                    count.ToString(CultureInfo.InvariantCulture) +
+                    "/" +
+                    ordered.Count.ToString(CultureInfo.InvariantCulture) +
+                    " 根装配，当前 " +
+                    label);
+                Console.Out.Flush();
+            }
+        }
+
         var bundle = new ExportBundle
         {
             ExportedAtUtc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
@@ -30,35 +83,29 @@ internal static class BodyBracketBundleExporter
             {
                 ModelPath = TryGetModelPath(model),
                 SelectionMode = "selected",
-                ExporterVersion = "xingcai-runner-body-bracket-0.3.2-plate-face"
+                ExporterVersion = ExporterVersion
             },
-            Assemblies = assemblies
-                .OrderBy(assembly => assembly.Identifier.ID)
-                .Select(assembly => BuildAssemblyExport(model, assembly))
-                .Where(assembly => assembly != null)
-                .Cast<ExportedAssembly>()
-                .ToList()
+            Assemblies = exported
         };
 
         var exportPath = Path.Combine(outputDirectory, "tekla-body-bracket-export.bundle.json");
         WriteJson(exportPath, bundle);
-
-        foreach (var assembly in bundle.Assemblies)
-        {
-            var labelTemplate = new AssemblyLabelTemplate
-            {
-                AssemblyId = assembly.AssemblyId
-            };
-            var labelPath = Path.Combine(outputDirectory, "assembly-" + SanitizeFileName(assembly.AssemblyId) + ".labels.template.json");
-            WriteJson(labelPath, labelTemplate);
-        }
+        exportWatch.Stop();
 
         var summary = new StringBuilder();
         summary.AppendLine("Tekla body/bracket export completed.");
+        summary.AppendLine("Exporter: " + ExporterVersion);
         summary.AppendLine("Assemblies: " + bundle.Assemblies.Count.ToString(CultureInfo.InvariantCulture));
+        summary.AppendLine("Bevel index seconds: " + indexWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture));
+        summary.AppendLine("Assembly export seconds: " + exportWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture));
         summary.AppendLine("Output: " + exportPath);
         File.WriteAllText(Path.Combine(outputDirectory, "README-body-bracket-export.txt"), summary.ToString(), Encoding.UTF8);
 
+        Console.WriteLine(
+            "Bundle 写出完成，装配导出+序列化 " +
+            exportWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
+            "s");
+        Console.Out.Flush();
         return exportPath;
     }
 
@@ -97,7 +144,10 @@ internal static class BodyBracketBundleExporter
         return null;
     }
 
-    private static ExportedAssembly BuildAssemblyExport(Model model, Assembly assembly)
+    private static ExportedAssembly BuildAssemblyExport(
+        Model model,
+        Assembly assembly,
+        IReadOnlyDictionary<int, List<ModelObject>> bevelByFather)
     {
         var mainPart = assembly.GetMainPart() as Part;
         if (mainPart == null)
@@ -110,13 +160,18 @@ internal static class BodyBracketBundleExporter
             .ToDictionary(group => group.Key, group => group.First());
 
         var memberAxisEvidence = BuildMemberAxisEvidence(model, mainPart);
-        var bevelByFather = IndexBevelObjectsByFather(model, new HashSet<int>(parts.Keys));
-        var exportedParts = parts.Values
-            .OrderBy(part => part.Identifier.ID)
-            .Select(part => BuildPartExport(model, part, memberAxisEvidence, bevelByFather))
-            .Where(part => part != null)
-            .Cast<ExportedPart>()
-            .ToList();
+        var partCaches = new Dictionary<int, PartObjectCache>();
+        var exportedParts = new List<ExportedPart>();
+        foreach (var part in parts.Values.OrderBy(item => item.Identifier.ID))
+        {
+            var cache = LoadPartObjectCache(part);
+            partCaches[part.Identifier.ID] = cache;
+            var exported = BuildPartExport(model, part, memberAxisEvidence, bevelByFather, cache);
+            if (exported != null)
+            {
+                exportedParts.Add(exported);
+            }
+        }
 
         ApplySegmentAdjacencyEvidence(exportedParts);
         var teklaPartList = parts.Values.ToList();
@@ -128,7 +183,7 @@ internal static class BodyBracketBundleExporter
             AssemblyId = assembly.Identifier.ID.ToString(CultureInfo.InvariantCulture),
             MainPartId = mainPart.Identifier.ID,
             Parts = exportedParts,
-            Relationships = BuildRelationships(parts.Values.ToList(), exportedParts),
+            Relationships = BuildRelationships(parts.Values.ToList(), exportedParts, partCaches),
             Metadata = new ExportedAssemblyMetadata
             {
                 AssemblyPosition = TryGetStringReportProperty(assembly, "ASSEMBLY_POS") ?? string.Empty,
@@ -165,7 +220,8 @@ internal static class BodyBracketBundleExporter
         Model model,
         Part part,
         ExportedMemberAxisEvidence memberAxisEvidence,
-        IReadOnlyDictionary<int, List<ModelObject>> bevelByFather)
+        IReadOnlyDictionary<int, List<ModelObject>> bevelByFather,
+        PartObjectCache cache)
     {
         var runtimeType = MapRuntimeType(part);
         var profileString = part.Profile != null ? part.Profile.ProfileString ?? string.Empty : string.Empty;
@@ -186,12 +242,12 @@ internal static class BodyBracketBundleExporter
         var contourPoints = GetContourPoints(part, coordinateSystem, localBox, isPlateLike, isSpecialShape, thickness);
         var contourSegments = GetContourSegments(part, contourPoints);
         var hasArcContour = contourSegments.Any(IsArcContourSegment);
-        var weldStats = GetWeldStrengths(part);
-        var weldDetails = GetWeldDetails(part);
-        var booleanCounts = GetBooleanCounts(part);
-        var booleanCutDetails = GetBooleanCutDetails(part);
-        var boltHoles = GetBoltHoles(part);
-        var partCoordSys = GetCoordinateSystemExport(part);
+        var weldStats = GetWeldStrengths(cache.Welds);
+        var weldDetails = GetWeldDetails(cache.Welds);
+        var booleanCounts = GetBooleanCounts(cache.Booleans);
+        var booleanCutDetails = GetBooleanCutDetails(cache.Booleans);
+        var boltHoles = GetBoltHoles(cache.Bolts);
+        var partCoordSys = ToExportedCoordinateSystem(coordinateSystem);
         var center = GetCenter(globalBox);
 
         ExportedVector3 plateNormal;
@@ -230,6 +286,7 @@ internal static class BodyBracketBundleExporter
             thickness,
             globalBox,
             extraBevels,
+            cache.Booleans,
             out booleanObjectTypes,
             out endChamferCount);
         var bevelCount = 0;
@@ -275,7 +332,7 @@ internal static class BodyBracketBundleExporter
             PartPosition = TryGetStringReportProperty(part, "PART_POS") ?? string.Empty,
             ContourVertexCount = contourPoints.Count,
             ConcaveCornerCount = ComputeConcaveCornerCount(contourPoints, coordinateSystem),
-            HoleLikeFeatureCount = GetHoleLikeCount(part, holeCuts),
+            HoleLikeFeatureCount = boltHoles.Count + holeCuts,
             BooleanCutCount = booleanCounts.Cuts,
             BooleanAddCount = booleanCounts.Adds,
             ShopWeldDegree = weldStats.Shop,
@@ -1586,7 +1643,10 @@ internal static class BodyBracketBundleExporter
 
         return radial.Z >= 0 ? "RADIAL_Z_POS" : "RADIAL_Z_NEG";
     }
-    private static List<ExportedRelationship> BuildRelationships(IReadOnlyList<Part> parts, IReadOnlyList<ExportedPart> exportedParts)
+    private static List<ExportedRelationship> BuildRelationships(
+        IReadOnlyList<Part> parts,
+        IReadOnlyList<ExportedPart> exportedParts,
+        IReadOnlyDictionary<int, PartObjectCache> partCaches)
     {
         var partIds = new HashSet<int>(parts.Select(part => part.Identifier.ID));
         var relationships = new List<ExportedRelationship>();
@@ -1594,13 +1654,17 @@ internal static class BodyBracketBundleExporter
 
         foreach (var part in parts)
         {
-            var welds = part.GetWelds();
-            while (welds != null && welds.MoveNext())
+            PartObjectCache cache;
+            if (partCaches == null || !partCaches.TryGetValue(part.Identifier.ID, out cache))
             {
-                var weld = welds.Current as BaseWeld;
-                var main = weld != null ? weld.MainObject as Part : null;
-                var secondary = weld != null ? weld.SecondaryObject as Part : null;
-                if (weld == null || main == null || secondary == null)
+                cache = LoadPartObjectCache(part);
+            }
+
+            foreach (var weld in cache.Welds)
+            {
+                var main = weld.MainObject as Part;
+                var secondary = weld.SecondaryObject as Part;
+                if (main == null || secondary == null)
                 {
                     continue;
                 }
@@ -1622,12 +1686,10 @@ internal static class BodyBracketBundleExporter
                 AddRelationship(seen, relationships, main.Identifier.ID, secondary.Identifier.ID, "Weld", strength, 1.0, meta);
             }
 
-            var booleans = part.GetBooleans();
-            while (booleans != null && booleans.MoveNext())
+            foreach (var booleanPart in cache.Booleans)
             {
-                var booleanPart = booleans.Current as BooleanPart;
-                var operativePart = booleanPart != null ? booleanPart.OperativePart : null;
-                if (booleanPart == null || operativePart == null)
+                var operativePart = booleanPart.OperativePart;
+                if (operativePart == null)
                 {
                     continue;
                 }
@@ -1648,15 +1710,8 @@ internal static class BodyBracketBundleExporter
                     booleanPart.Type.ToString());
             }
 
-            var bolts = part.GetBolts();
-            while (bolts != null && bolts.MoveNext())
+            foreach (var bolt in cache.Bolts)
             {
-                var bolt = bolts.Current as BoltGroup;
-                if (bolt == null)
-                {
-                    continue;
-                }
-
                 var partToBoltTo = bolt.PartToBoltTo;
                 var partToBeBolted = bolt.PartToBeBolted;
                 if (partToBoltTo == null || partToBeBolted == null)
@@ -1760,22 +1815,20 @@ internal static class BodyBracketBundleExporter
         });
     }
 
-    private static (double Shop, double Site) GetWeldStrengths(Part part)
+    private static (double Shop, double Site) GetWeldStrengths(IReadOnlyList<BaseWeld> welds)
     {
         var seen = new HashSet<int>();
         double shop = 0.0;
         double site = 0.0;
 
-        var welds = part.GetWelds();
-        while (welds != null && welds.MoveNext())
+        if (welds == null)
         {
-            var weld = welds.Current as BaseWeld;
-            if (weld == null)
-            {
-                continue;
-            }
+            return (0.0, 0.0);
+        }
 
-            if (!seen.Add(weld.Identifier.ID))
+        foreach (var weld in welds)
+        {
+            if (weld == null || !seen.Add(weld.Identifier.ID))
             {
                 continue;
             }
@@ -1794,16 +1847,19 @@ internal static class BodyBracketBundleExporter
         return (Math.Round(shop, 4), Math.Round(site, 4));
     }
 
-    private static (int Cuts, int Adds) GetBooleanCounts(Part part)
+    private static (int Cuts, int Adds) GetBooleanCounts(IReadOnlyList<BooleanPart> booleans)
     {
         var seen = new HashSet<int>();
         var cuts = 0;
         var adds = 0;
 
-        var booleans = part.GetBooleans();
-        while (booleans != null && booleans.MoveNext())
+        if (booleans == null)
         {
-            var booleanPart = booleans.Current as BooleanPart;
+            return (0, 0);
+        }
+
+        foreach (var booleanPart in booleans)
+        {
             if (booleanPart == null || !seen.Add(booleanPart.Identifier.ID))
             {
                 continue;
@@ -1826,22 +1882,6 @@ internal static class BodyBracketBundleExporter
         }
 
         return (cuts, adds);
-    }
-
-    private static int GetHoleLikeCount(Part part, int booleanCutCount)
-    {
-        var seen = new HashSet<int>();
-        var bolts = part.GetBolts();
-        while (bolts != null && bolts.MoveNext())
-        {
-            var bolt = bolts.Current as BoltGroup;
-            if (bolt != null)
-            {
-                seen.Add(bolt.Identifier.ID);
-            }
-        }
-
-        return seen.Count + booleanCutCount;
     }
 
     private static List<ExportedVector3> GetContourPoints(
@@ -2239,15 +2279,17 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: 螺栓孔详情 ===
-    private static List<ExportedBoltHole> GetBoltHoles(Part part)
+    private static List<ExportedBoltHole> GetBoltHoles(IReadOnlyList<BoltGroup> bolts)
     {
         var holes = new List<ExportedBoltHole>();
         var seen = new HashSet<int>();
-
-        var bolts = part.GetBolts();
-        while (bolts != null && bolts.MoveNext())
+        if (bolts == null)
         {
-            var bolt = bolts.Current as BoltGroup;
+            return holes;
+        }
+
+        foreach (var bolt in bolts)
+        {
             if (bolt == null || !seen.Add(bolt.Identifier.ID)) continue;
 
             var partToBoltTo = bolt.PartToBoltTo;
@@ -2282,15 +2324,17 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: 焊缝详情 ===
-    private static List<ExportedWeldDetail> GetWeldDetails(Part part)
+    private static List<ExportedWeldDetail> GetWeldDetails(IReadOnlyList<BaseWeld> welds)
     {
         var details = new List<ExportedWeldDetail>();
         var seen = new HashSet<int>();
-
-        var welds = part.GetWelds();
-        while (welds != null && welds.MoveNext())
+        if (welds == null)
         {
-            var weld = welds.Current as BaseWeld;
+            return details;
+        }
+
+        foreach (var weld in welds)
+        {
             if (weld == null || !seen.Add(weld.Identifier.ID)) continue;
 
             var main = weld.MainObject as Part;
@@ -2322,15 +2366,17 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: Boolean切割详情 ===
-    private static List<ExportedBooleanCut> GetBooleanCutDetails(Part part)
+    private static List<ExportedBooleanCut> GetBooleanCutDetails(IReadOnlyList<BooleanPart> booleans)
     {
         var details = new List<ExportedBooleanCut>();
         var seen = new HashSet<int>();
-
-        var booleans = part.GetBooleans();
-        while (booleans != null && booleans.MoveNext())
+        if (booleans == null)
         {
-            var booleanPart = booleans.Current as BooleanPart;
+            return details;
+        }
+
+        foreach (var booleanPart in booleans)
+        {
             if (booleanPart == null || !seen.Add(booleanPart.Identifier.ID)) continue;
 
             var operativePart = booleanPart.OperativePart;
@@ -2359,10 +2405,10 @@ internal static class BodyBracketBundleExporter
     private const double BevelTiltMinDeg = 8.0;
     private const double BevelTiltMaxDeg = 82.0;
 
-    private static Dictionary<int, List<ModelObject>> IndexBevelObjectsByFather(Model model, HashSet<int> partIds)
+    private static Dictionary<int, List<ModelObject>> IndexBevelObjectsByFather(Model model)
     {
         var map = new Dictionary<int, List<ModelObject>>();
-        if (model == null || partIds == null || partIds.Count == 0)
+        if (model == null)
         {
             return map;
         }
@@ -2420,7 +2466,7 @@ internal static class BodyBracketBundleExporter
                 }
 
                 var fatherId = SafeGetIdentifier(father);
-                if (!partIds.Contains(fatherId))
+                if (fatherId == 0)
                 {
                     continue;
                 }
@@ -2448,6 +2494,7 @@ internal static class BodyBracketBundleExporter
         double? partThickness,
         GlobalBoundingBox plateBox,
         List<ModelObject> extra,
+        IReadOnlyList<BooleanPart> partBooleans,
         out List<string> objectTypes,
         out int endChamferCount)
     {
@@ -2458,7 +2505,14 @@ internal static class BodyBracketBundleExporter
         var objects = new List<ModelObject>();
         endChamferCount = 0;
 
-        AppendEnumerator(TryGetBooleans(part), seen, objects, typeNames);
+        if (partBooleans != null)
+        {
+            foreach (var booleanPart in partBooleans)
+            {
+                AddBooleanLike(booleanPart, seen, objects, typeNames);
+            }
+        }
+
         CollectBooleanLikeRecursive(part, seen, objects, typeNames, 0);
         if (extra != null)
         {
@@ -2537,6 +2591,62 @@ internal static class BodyBracketBundleExporter
 
         objectTypes = typeNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
         return details;
+    }
+
+    private static PartObjectCache LoadPartObjectCache(Part part)
+    {
+        var cache = new PartObjectCache();
+        if (part == null)
+        {
+            return cache;
+        }
+
+        var booleanSeen = new HashSet<int>();
+        var booleans = TryGetBooleans(part);
+        while (booleans != null && booleans.MoveNext())
+        {
+            var booleanPart = booleans.Current as BooleanPart;
+            if (booleanPart != null && booleanSeen.Add(SafeGetIdentifier(booleanPart)))
+            {
+                cache.Booleans.Add(booleanPart);
+            }
+        }
+
+        try
+        {
+            var bolts = part.GetBolts();
+            var boltSeen = new HashSet<int>();
+            while (bolts != null && bolts.MoveNext())
+            {
+                var bolt = bolts.Current as BoltGroup;
+                if (bolt != null && boltSeen.Add(SafeGetIdentifier(bolt)))
+                {
+                    cache.Bolts.Add(bolt);
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            var welds = part.GetWelds();
+            var weldSeen = new HashSet<int>();
+            while (welds != null && welds.MoveNext())
+            {
+                var weld = welds.Current as BaseWeld;
+                if (weld != null && weldSeen.Add(SafeGetIdentifier(weld)))
+                {
+                    cache.Welds.Add(weld);
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return cache;
     }
 
     private static ModelObjectEnumerator TryGetBooleans(Part part)
@@ -3165,12 +3275,11 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: 零件坐标系 ===
-    private static ExportedCoordinateSystem GetCoordinateSystemExport(Part part)
+    private static ExportedCoordinateSystem ToExportedCoordinateSystem(CoordinateSystem coordinateSystem)
     {
-        var cs = part.GetCoordinateSystem();
-        var origin = cs.Origin;
-        var axisX = Normalize(ToVector(cs.AxisX));
-        var axisY = Normalize(ToVector(cs.AxisY));
+        var origin = coordinateSystem.Origin;
+        var axisX = Normalize(ToVector(coordinateSystem.AxisX));
+        var axisY = Normalize(ToVector(coordinateSystem.AxisY));
         var axisZ = Cross(axisX, axisY);
 
         return new ExportedCoordinateSystem
