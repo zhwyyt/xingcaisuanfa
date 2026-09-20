@@ -28,24 +28,15 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
 
         foreach (var assembly in GetTargetAssemblies())
         {
-            var member = ExtractAssembly(assembly);
-            if (member != null)
+            var member = TryExtractAssembly(assembly);
+            if (member == null)
             {
-                yield return member;
+                continue;
             }
-        }
-    }
 
-    public MemberSnapshot? ExtractAssembly(Assembly assembly)
-    {
-        var member = TryExtractAssembly(assembly);
-        if (member == null)
-        {
-            return null;
+            member.Samples.AddRange(_sectionSampler.BuildSamples(member));
+            yield return member;
         }
-
-        member.Samples.AddRange(_sectionSampler.BuildSamples(member));
-        return member;
     }
 
     private IEnumerable<Assembly> GetTargetAssemblies()

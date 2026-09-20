@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
-using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -51,116 +49,30 @@ internal static class Program
                 MemberPrefixFilter = options.MemberPrefixFilter,
                 SelectedOnly = true
             };
-            var samplingOptions = new TeklaSectionClassifier.SamplingOptions
-            {
-                Enabled = false
-            };
+            var samplingOptions = new TeklaSectionClassifier.SamplingOptions();
 
             Console.WriteLine("当前模式: 仅导出 Tekla 中已选中的构件。可选中 assembly 或任意属于该构件的零件。");
-            Console.WriteLine("识别导出关闭截面采样，选择集只遍历一次。");
 
-            var assemblies = BodyBracketBundleExporter.CollectSelectedAssemblies();
-            if (assemblies.Count == 0)
+            TeklaSectionClassifier.ExtractionPipeline pipeline;
+            string sqliteMessage;
+            if (TryCreateSqlitePipeline(model, options, extractionOptions, samplingOptions, out pipeline, out sqliteMessage))
             {
-                throw new InvalidOperationException("没有从当前选择集中解析出可导出的 assembly。请先在 Tekla 中选择 assembly 或属于该 assembly 的零件。");
+                Console.WriteLine(sqliteMessage);
+            }
+            else
+            {
+                pipeline = TeklaSectionClassifier.ExtractionPipeline.CreateJsonOnly(model, extractionOptions, samplingOptions);
+                Console.WriteLine(sqliteMessage);
             }
 
             var jsonDir = Path.Combine(options.OutputDirectory, "members");
-            Directory.CreateDirectory(jsonDir);
             var sqlitePath = options.EnableSqlite ? Path.Combine(options.OutputDirectory, "tekla_members.db") : string.Empty;
-            TeklaSectionClassifier.ISqliteCacheWriter sqliteWriter;
-            string sqliteMessage;
-            TryCreateSqliteWriter(options, out sqliteWriter, out sqliteMessage);
-            Console.WriteLine(sqliteMessage);
-            if (!string.IsNullOrWhiteSpace(sqlitePath))
-            {
-                sqliteWriter.InitializeDatabase(sqlitePath);
-            }
-
-            var sampler = new TeklaSectionClassifier.DefaultSectionSampler(
-                samplingOptions,
-                new TeklaSectionClassifier.DefaultAnomalyDetector(samplingOptions),
-                new TeklaSectionClassifier.ApproximateSectionIntersectionService());
-            var extractor = new TeklaSectionClassifier.Tekla2017MemberExtractor(model, extractionOptions, sampler);
-            var classifier = new TeklaSectionClassifier.FirstPassMemberClassifier(new TeklaSectionClassifier.FirstPassPartRoleScorer());
-            var jsonWriter = new TeklaSectionClassifier.JsonCacheWriter();
-            var batch = new TeklaSectionClassifier.ExtractionBatch();
-
-            Console.WriteLine("开始单次导出: " + assemblies.Count.ToString(CultureInfo.InvariantCulture) + " 根装配");
-            Console.Out.Flush();
-
-            var indexWatch = Stopwatch.StartNew();
-            var bevelByFather = BodyBracketBundleExporter.IndexBevelObjectsByFather(model);
-            indexWatch.Stop();
-            Console.WriteLine(
-                "剖口对象索引完成: " +
-                bevelByFather.Count.ToString(CultureInfo.InvariantCulture) +
-                " 个父零件，耗时 " +
-                indexWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
-                "s");
-            Console.Out.Flush();
-
-            var ordered = assemblies.OrderBy(assembly => assembly.Identifier.ID).ToList();
-            var exported = new List<ExportedAssembly>();
-            var exportWatch = Stopwatch.StartNew();
-            for (var i = 0; i < ordered.Count; i++)
-            {
-                var assembly = ordered[i];
-                var member = extractor.ExtractAssembly(assembly);
-                var item = BodyBracketBundleExporter.BuildAssemblyExport(model, assembly, bevelByFather);
-                if (item != null)
-                {
-                    exported.Add(item);
-                }
-
-                if (member != null)
-                {
-                    member.Classification = classifier.Classify(member);
-                    ApplyBundleBodyHint(member, item);
-                    batch.Members.Add(member);
-                    jsonWriter.WriteMemberJson(member, jsonDir);
-                    if (!string.IsNullOrWhiteSpace(sqlitePath))
-                    {
-                        sqliteWriter.UpsertMember(member, sqlitePath);
-                    }
-                }
-
-                var count = i + 1;
-                if (count == 1 || count % 10 == 0 || count == ordered.Count)
-                {
-                    var label = member != null && member.Member != null && !string.IsNullOrWhiteSpace(member.Member.MemberId)
-                        ? member.Member.MemberId
-                        : item != null && item.Metadata != null && !string.IsNullOrWhiteSpace(item.Metadata.AssemblyPosition)
-                            ? item.Metadata.AssemblyPosition
-                            : assembly.Identifier.ID.ToString(CultureInfo.InvariantCulture);
-                    Console.WriteLine(
-                        "进度: 已处理 " +
-                        count.ToString(CultureInfo.InvariantCulture) +
-                        "/" +
-                        ordered.Count.ToString(CultureInfo.InvariantCulture) +
-                        " 根装配，当前 " +
-                        label);
-                    Console.Out.Flush();
-                }
-            }
-
-            jsonWriter.WriteBatchSummary(batch, jsonDir);
-            var bundlePath = BodyBracketBundleExporter.WriteBundleFile(
-                model,
-                options.OutputDirectory,
-                exported,
-                indexWatch.Elapsed.TotalSeconds,
-                exportWatch.Elapsed.TotalSeconds);
-            exportWatch.Stop();
+            var batch = pipeline.Run(jsonDir, sqlitePath, ReportProgress);
+            var bundlePath = BodyBracketBundleExporter.Write(model, options.OutputDirectory);
 
             Console.WriteLine($"导出完成: {batch.Members.Count} 根构件");
             Console.WriteLine($"JSON目录: {jsonDir}");
             Console.WriteLine($"Body/Bracket Bundle: {bundlePath}");
-            Console.WriteLine(
-                "单次导出耗时 " +
-                exportWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
-                "s");
-            Console.Out.Flush();
             if (options.EnableSqlite && !string.IsNullOrWhiteSpace(sqlitePath) && File.Exists(sqlitePath))
             {
                 Console.WriteLine($"SQLite: {sqlitePath}");
@@ -252,21 +164,24 @@ internal static class Program
         }
     }
 
-    private static bool TryCreateSqliteWriter(
+    private static bool TryCreateSqlitePipeline(
+        Model model,
         RunnerOptions options,
-        out TeklaSectionClassifier.ISqliteCacheWriter writer,
+        TeklaSectionClassifier.ExtractionOptions extractionOptions,
+        TeklaSectionClassifier.SamplingOptions samplingOptions,
+        out TeklaSectionClassifier.ExtractionPipeline pipeline,
         out string message)
     {
         if (!options.EnableSqlite)
         {
-            writer = new TeklaSectionClassifier.NullSqliteCacheWriter();
+            pipeline = null!;
             message = "SQLite 已关闭，仅导出 JSON。";
             return false;
         }
 
         if (string.IsNullOrWhiteSpace(options.SqliteProviderPath) || !File.Exists(options.SqliteProviderPath))
         {
-            writer = new TeklaSectionClassifier.NullSqliteCacheWriter();
+            pipeline = null!;
             message = "未提供可用的 SQLite provider，已回退为仅导出 JSON。";
             return false;
         }
@@ -275,7 +190,7 @@ internal static class Program
         var connectionType = assembly.GetTypes().FirstOrDefault(type => typeof(IDbConnection).IsAssignableFrom(type) && !type.IsAbstract);
         if (connectionType == null)
         {
-            writer = new TeklaSectionClassifier.NullSqliteCacheWriter();
+            pipeline = null!;
             message = "SQLite provider 中未找到可用的 IDbConnection 实现，已回退为仅导出 JSON。";
             return false;
         }
@@ -288,79 +203,9 @@ internal static class Program
             return connection;
         }
 
-        writer = new TeklaSectionClassifier.SqliteCacheWriter(ConnectionFactory);
+        pipeline = TeklaSectionClassifier.ExtractionPipeline.CreateDefault(model, ConnectionFactory, extractionOptions, samplingOptions);
         message = $"SQLite 已启用: {options.SqliteProviderPath}";
         return true;
-    }
-
-    private static void ApplyBundleBodyHint(
-        TeklaSectionClassifier.MemberSnapshot member,
-        ExportedAssembly? item)
-    {
-        if (member?.Classification == null || item?.Metadata == null)
-        {
-            return;
-        }
-
-        var classification = member.Classification;
-        if (classification.MainClass != TeklaSectionClassifier.MemberClass.Irregular &&
-            classification.MainClass != TeklaSectionClassifier.MemberClass.Unknown)
-        {
-            return;
-        }
-
-        var boxLoops = item.Metadata.BoxSectionEvidence != null
-            ? item.Metadata.BoxSectionEvidence.StationLoops
-            : null;
-        var hasClosedBox = boxLoops != null && boxLoops.Any(loop => loop != null && loop.ClosedLoopCount > 0);
-        var hFrames = item.Metadata.HBeamSectionEvidence != null
-            ? item.Metadata.HBeamSectionEvidence.StationFrames
-            : null;
-        var hasHFrames = hFrames != null && hFrames.Count > 0;
-        if (!hasClosedBox && !hasHFrames)
-        {
-            return;
-        }
-
-        if (classification.Labels == null)
-        {
-            classification.Labels = new List<string>();
-        }
-
-        if (hasClosedBox)
-        {
-            classification.MainClass = TeklaSectionClassifier.MemberClass.Box;
-            if (!StartsWithToken(classification.KeyDimensionsDisplay, "BOX"))
-            {
-                classification.KeyDimensionsDisplay = string.IsNullOrWhiteSpace(classification.KeyDimensionsDisplay)
-                    ? "BOX"
-                    : "BOX " + classification.KeyDimensionsDisplay;
-            }
-
-            if (!classification.Labels.Contains("bundle-box-closed-loop-hint"))
-            {
-                classification.Labels.Add("bundle-box-closed-loop-hint");
-            }
-
-            return;
-        }
-
-        classification.MainClass = TeklaSectionClassifier.MemberClass.H;
-        if (string.IsNullOrWhiteSpace(classification.KeyDimensionsDisplay))
-        {
-            classification.KeyDimensionsDisplay = "H";
-        }
-
-        if (!classification.Labels.Contains("bundle-h-station-frame-hint"))
-        {
-            classification.Labels.Add("bundle-h-station-frame-hint");
-        }
-    }
-
-    private static bool StartsWithToken(string value, string token)
-    {
-        return !string.IsNullOrWhiteSpace(value) &&
-               value.TrimStart().StartsWith(token, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveMembersDirectory(string inputPath)

@@ -14,7 +14,7 @@ namespace TeklaSectionClassifier.Runner;
 
 internal static class BodyBracketBundleExporter
 {
-    private const string ExporterVersion = "xingcai-runner-body-bracket-0.3.4-single-pass";
+    private const string ExporterVersion = "xingcai-runner-body-bracket-0.3.3-index-once";
 
     private sealed class PartObjectCache
     {
@@ -109,41 +109,7 @@ internal static class BodyBracketBundleExporter
         return exportPath;
     }
 
-    internal static string WriteBundleFile(
-        Model model,
-        string outputDirectory,
-        List<ExportedAssembly> exported,
-        double indexSeconds,
-        double exportSeconds)
-    {
-        Directory.CreateDirectory(outputDirectory);
-        var bundle = new ExportBundle
-        {
-            ExportedAtUtc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
-            Source = new ExportSourceInfo
-            {
-                ModelPath = TryGetModelPath(model),
-                SelectionMode = "selected",
-                ExporterVersion = ExporterVersion
-            },
-            Assemblies = exported
-        };
-
-        var exportPath = Path.Combine(outputDirectory, "tekla-body-bracket-export.bundle.json");
-        WriteJson(exportPath, bundle);
-
-        var summary = new StringBuilder();
-        summary.AppendLine("Tekla body/bracket export completed.");
-        summary.AppendLine("Exporter: " + ExporterVersion);
-        summary.AppendLine("Assemblies: " + bundle.Assemblies.Count.ToString(CultureInfo.InvariantCulture));
-        summary.AppendLine("Bevel index seconds: " + indexSeconds.ToString("0.0", CultureInfo.InvariantCulture));
-        summary.AppendLine("Assembly export seconds: " + exportSeconds.ToString("0.0", CultureInfo.InvariantCulture));
-        summary.AppendLine("Output: " + exportPath);
-        File.WriteAllText(Path.Combine(outputDirectory, "README-body-bracket-export.txt"), summary.ToString(), Encoding.UTF8);
-        return exportPath;
-    }
-
-    internal static List<Assembly> CollectSelectedAssemblies()
+    private static List<Assembly> CollectSelectedAssemblies()
     {
         var selector = new Tekla.Structures.Model.UI.ModelObjectSelector();
         var selected = selector.GetSelectedObjects();
@@ -178,7 +144,7 @@ internal static class BodyBracketBundleExporter
         return null;
     }
 
-    internal static ExportedAssembly BuildAssemblyExport(
+    private static ExportedAssembly BuildAssemblyExport(
         Model model,
         Assembly assembly,
         IReadOnlyDictionary<int, List<ModelObject>> bevelByFather)
@@ -2439,7 +2405,7 @@ internal static class BodyBracketBundleExporter
     private const double BevelTiltMinDeg = 8.0;
     private const double BevelTiltMaxDeg = 82.0;
 
-    internal static Dictionary<int, List<ModelObject>> IndexBevelObjectsByFather(Model model)
+    private static Dictionary<int, List<ModelObject>> IndexBevelObjectsByFather(Model model)
     {
         var map = new Dictionary<int, List<ModelObject>>();
         if (model == null)
