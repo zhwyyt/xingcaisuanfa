@@ -21,6 +21,11 @@ public sealed class DefaultSectionSampler : ISectionSampler
 
     public IReadOnlyList<SectionSample> BuildSamples(MemberSnapshot member)
     {
+        if (!_options.Enabled)
+        {
+            return new List<SectionSample>();
+        }
+
         var samples = new List<SectionSample>();
         for (var index = 0; index < _options.DefaultRatios.Count; index++)
         {

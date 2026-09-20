@@ -29,7 +29,7 @@ internal sealed class ExportSourceInfo
     public string SelectionMode { get; set; } = "selected";
 
     [DataMember(Name = "exporterVersion", Order = 3)]
-    public string ExporterVersion { get; set; } = "xingcai-runner-body-bracket-0.3.3-index-once";
+    public string ExporterVersion { get; set; } = "xingcai-runner-body-bracket-0.3.4-single-pass";
 }
 
 [DataContract]
