@@ -30,7 +30,7 @@ internal static class BodyBracketBundleExporter
             {
                 ModelPath = TryGetModelPath(model),
                 SelectionMode = "selected",
-                ExporterVersion = "xingcai-runner-body-bracket-0.2.0-enhanced"
+                ExporterVersion = "xingcai-runner-body-bracket-0.3.2-plate-face"
             },
             Assemblies = assemblies
                 .OrderBy(assembly => assembly.Identifier.ID)
@@ -110,9 +110,10 @@ internal static class BodyBracketBundleExporter
             .ToDictionary(group => group.Key, group => group.First());
 
         var memberAxisEvidence = BuildMemberAxisEvidence(model, mainPart);
+        var bevelByFather = IndexBevelObjectsByFather(model, new HashSet<int>(parts.Keys));
         var exportedParts = parts.Values
             .OrderBy(part => part.Identifier.ID)
-            .Select(part => BuildPartExport(model, part, memberAxisEvidence))
+            .Select(part => BuildPartExport(model, part, memberAxisEvidence, bevelByFather))
             .Where(part => part != null)
             .Cast<ExportedPart>()
             .ToList();
@@ -160,7 +161,11 @@ internal static class BodyBracketBundleExporter
             .Select(group => group.First());
     }
 
-    private static ExportedPart BuildPartExport(Model model, Part part, ExportedMemberAxisEvidence memberAxisEvidence)
+    private static ExportedPart BuildPartExport(
+        Model model,
+        Part part,
+        ExportedMemberAxisEvidence memberAxisEvidence,
+        IReadOnlyDictionary<int, List<ModelObject>> bevelByFather)
     {
         var runtimeType = MapRuntimeType(part);
         var profileString = part.Profile != null ? part.Profile.ProfileString ?? string.Empty : string.Empty;
@@ -178,9 +183,9 @@ internal static class BodyBracketBundleExporter
         var globalBox = GetGlobalBoundingBox(part);
         var localBox = GetLocalBoundingBox(model, part, coordinateSystem);
         var thickness = ResolveThickness(part, profileString, localBox);
-        var contourPoints = GetContourPoints(part);
-        var contourSegments = GetContourSegments(part);
-        var hasArcContour = contourSegments.Any(s => s.ChamferType != "None" && s.ChamferType != "Line");
+        var contourPoints = GetContourPoints(part, coordinateSystem, localBox, isPlateLike, isSpecialShape, thickness);
+        var contourSegments = GetContourSegments(part, contourPoints);
+        var hasArcContour = contourSegments.Any(IsArcContourSegment);
         var weldStats = GetWeldStrengths(part);
         var weldDetails = GetWeldDetails(part);
         var booleanCounts = GetBooleanCounts(part);
@@ -208,6 +213,43 @@ internal static class BodyBracketBundleExporter
             plateWidthDirection = ToExportedVector3(axisY);
         }
 
+        List<ModelObject> extraBevels;
+        if (bevelByFather == null || !bevelByFather.TryGetValue(part.Identifier.ID, out extraBevels))
+        {
+            extraBevels = new List<ModelObject>();
+        }
+
+        List<string> booleanObjectTypes;
+        int endChamferCount;
+        var edgeBevels = GetEdgeBevels(
+            part,
+            ToVector(plateNormal),
+            ToVector(plateLongDirection),
+            profileString,
+            isPlateLike,
+            thickness,
+            globalBox,
+            extraBevels,
+            out booleanObjectTypes,
+            out endChamferCount);
+        var bevelCount = 0;
+        var bevelBooleanCuts = 0;
+        foreach (var item in edgeBevels)
+        {
+            if (!item.IsBevel)
+            {
+                continue;
+            }
+
+            bevelCount++;
+            if (string.Equals(item.Kind, "BOOLEAN_CUT", StringComparison.OrdinalIgnoreCase))
+            {
+                bevelBooleanCuts++;
+            }
+        }
+
+        var holeCuts = Math.Max(0, booleanCounts.Cuts - bevelBooleanCuts - endChamferCount);
+
         return new ExportedPart
         {
             PartId = part.Identifier.ID,
@@ -233,7 +275,7 @@ internal static class BodyBracketBundleExporter
             PartPosition = TryGetStringReportProperty(part, "PART_POS") ?? string.Empty,
             ContourVertexCount = contourPoints.Count,
             ConcaveCornerCount = ComputeConcaveCornerCount(contourPoints, coordinateSystem),
-            HoleLikeFeatureCount = GetHoleLikeCount(part, booleanCounts.Cuts),
+            HoleLikeFeatureCount = GetHoleLikeCount(part, holeCuts),
             BooleanCutCount = booleanCounts.Cuts,
             BooleanAddCount = booleanCounts.Adds,
             ShopWeldDegree = weldStats.Shop,
@@ -247,7 +289,13 @@ internal static class BodyBracketBundleExporter
             WeldDetails = weldDetails,
             PartCoordinateSystem = partCoordSys,
             BooleanCutDetails = booleanCutDetails,
-            MainMaterialEvidence = BuildMainMaterialEvidence(isPlateLike, profileString, center, globalBox, contourPoints, plateNormal, memberAxisEvidence)
+            MainMaterialEvidence = BuildMainMaterialEvidence(isPlateLike, profileString, center, globalBox, contourPoints, plateNormal, memberAxisEvidence),
+            EdgeBevels = edgeBevels,
+            EdgeBevelCount = bevelCount,
+            HasEdgeBevel = bevelCount > 0,
+            BooleanObjectTypes = booleanObjectTypes,
+            EndChamferCount = endChamferCount,
+            HasEndChamfer = endChamferCount > 0
         };
     }
 
@@ -1762,6 +1810,11 @@ internal static class BodyBracketBundleExporter
             }
 
             var typeText = booleanPart.Type.ToString();
+            if (typeText.IndexOf("WELDPREP", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                continue;
+            }
+
             if (typeText.IndexOf("cut", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 cuts++;
@@ -1791,32 +1844,136 @@ internal static class BodyBracketBundleExporter
         return seen.Count + booleanCutCount;
     }
 
-    private static List<ExportedVector3> GetContourPoints(Part part)
+    private static List<ExportedVector3> GetContourPoints(
+        Part part,
+        CoordinateSystem coordinateSystem,
+        LocalBoundingBox localBox,
+        bool isPlateLike,
+        bool isSpecialShape,
+        double? thickness)
     {
         var contourPlate = part as ContourPlate;
-        if (contourPlate == null || contourPlate.Contour == null)
+        if (contourPlate != null && contourPlate.Contour != null)
+        {
+            var points = new List<ExportedVector3>();
+            foreach (var item in contourPlate.Contour.ContourPoints.Cast<object>())
+            {
+                var contourPoint = item as ContourPoint;
+                if (contourPoint == null)
+                {
+                    continue;
+                }
+
+                points.Add(new ExportedVector3
+                {
+                    X = Math.Round(contourPoint.X, 6),
+                    Y = Math.Round(contourPoint.Y, 6),
+                    Z = Math.Round(contourPoint.Z, 6)
+                });
+            }
+
+            if (points.Count >= 3)
+            {
+                return points;
+            }
+        }
+
+        if (isPlateLike && !isSpecialShape && part is Beam)
+        {
+            return PlateFaceCorners(coordinateSystem, localBox, thickness);
+        }
+
+        return new List<ExportedVector3>();
+    }
+
+    private static List<ExportedVector3> PlateFaceCorners(
+        CoordinateSystem coordinateSystem,
+        LocalBoundingBox localBox,
+        double? thickness)
+    {
+        if (coordinateSystem == null || localBox == null)
         {
             return new List<ExportedVector3>();
         }
 
-        var points = new List<ExportedVector3>();
-        foreach (var item in contourPlate.Contour.ContourPoints.Cast<object>())
+        var min = localBox.Min;
+        var max = localBox.Max;
+        var dx = Math.Abs(max.X - min.X);
+        var dy = Math.Abs(max.Y - min.Y);
+        var dz = Math.Abs(max.Z - min.Z);
+        var plateT = thickness.HasValue && thickness.Value > 0
+            ? thickness.Value
+            : new[] { dx, dy, dz }.Where(value => value > 1e-6).DefaultIfEmpty(0.0).Min();
+        var errX = Math.Abs(dx - plateT);
+        var errY = Math.Abs(dy - plateT);
+        var errZ = Math.Abs(dz - plateT);
+        var tAxis = 0;
+        var best = errX;
+        if (errY < best)
         {
-            var contourPoint = item as ContourPoint;
-            if (contourPoint == null)
-            {
-                continue;
-            }
-
-            points.Add(new ExportedVector3
-            {
-                X = Math.Round(contourPoint.X, 6),
-                Y = Math.Round(contourPoint.Y, 6),
-                Z = Math.Round(contourPoint.Z, 6)
-            });
+            tAxis = 1;
+            best = errY;
         }
 
-        return points;
+        if (errZ < best)
+        {
+            tAxis = 2;
+        }
+
+        var midX = (min.X + max.X) / 2.0;
+        var midY = (min.Y + max.Y) / 2.0;
+        var midZ = (min.Z + max.Z) / 2.0;
+        Point[] local;
+        if (tAxis == 2)
+        {
+            local = new[]
+            {
+                new Point(min.X, min.Y, midZ),
+                new Point(max.X, min.Y, midZ),
+                new Point(max.X, max.Y, midZ),
+                new Point(min.X, max.Y, midZ)
+            };
+        }
+        else if (tAxis == 1)
+        {
+            local = new[]
+            {
+                new Point(min.X, midY, min.Z),
+                new Point(max.X, midY, min.Z),
+                new Point(max.X, midY, max.Z),
+                new Point(min.X, midY, max.Z)
+            };
+        }
+        else
+        {
+            local = new[]
+            {
+                new Point(midX, min.Y, min.Z),
+                new Point(midX, max.Y, min.Z),
+                new Point(midX, max.Y, max.Z),
+                new Point(midX, min.Y, max.Z)
+            };
+        }
+
+        var result = new List<ExportedVector3>(4);
+        foreach (var point in local)
+        {
+            result.Add(ToExportedVector3(LocalToGlobal(coordinateSystem, point)));
+        }
+
+        return result;
+    }
+
+    private static Point LocalToGlobal(CoordinateSystem coordinateSystem, Point local)
+    {
+        var origin = coordinateSystem.Origin;
+        var axisX = Normalize(ToVector(coordinateSystem.AxisX));
+        var axisY = Normalize(ToVector(coordinateSystem.AxisY));
+        var axisZ = Normalize(Cross(axisX, axisY));
+        return new Point(
+            origin.X + (local.X * axisX.X) + (local.Y * axisY.X) + (local.Z * axisZ.X),
+            origin.Y + (local.X * axisX.Y) + (local.Y * axisY.Y) + (local.Z * axisZ.Y),
+            origin.Z + (local.X * axisX.Z) + (local.Y * axisY.Z) + (local.Z * axisZ.Z));
     }
 
     private static int ComputeConcaveCornerCount(List<ExportedVector3> contourPoints, CoordinateSystem coordinateSystem)
@@ -1996,20 +2153,20 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: 轮廓段详情（含ChamferType） ===
-    private static List<ExportedContourSegment> GetContourSegments(Part part)
+    private static List<ExportedContourSegment> GetContourSegments(Part part, List<ExportedVector3> contourPoints)
     {
         var segments = new List<ExportedContourSegment>();
         var contourPlate = part as ContourPlate;
         if (contourPlate == null || contourPlate.Contour == null)
         {
-            return segments;
+            return SegmentsFromPoints(contourPoints);
         }
 
-        var contourPoints = contourPlate.Contour.ContourPoints.Cast<object>().ToList();
-        for (int i = 0; i < contourPoints.Count; i++)
+        var sourcePoints = contourPlate.Contour.ContourPoints.Cast<object>().ToList();
+        for (int i = 0; i < sourcePoints.Count; i++)
         {
-            var current = contourPoints[i] as ContourPoint;
-            var next = contourPoints[(i + 1) % contourPoints.Count] as ContourPoint;
+            var current = sourcePoints[i] as ContourPoint;
+            var next = sourcePoints[(i + 1) % sourcePoints.Count] as ContourPoint;
             if (current == null || next == null) continue;
 
             var chamferType = "None";
@@ -2044,6 +2201,36 @@ internal static class BodyBracketBundleExporter
                 ChamferType = chamferType,
                 ChamferX = Math.Round(chamferX, 4),
                 ChamferY = Math.Round(chamferY, 4),
+                Length = Math.Round(length, 4)
+            });
+        }
+
+        return segments;
+    }
+
+    private static List<ExportedContourSegment> SegmentsFromPoints(List<ExportedVector3> contourPoints)
+    {
+        var segments = new List<ExportedContourSegment>();
+        if (contourPoints == null || contourPoints.Count < 3)
+        {
+            return segments;
+        }
+
+        for (var i = 0; i < contourPoints.Count; i++)
+        {
+            var start = contourPoints[i];
+            var end = contourPoints[(i + 1) % contourPoints.Count];
+            var length = Math.Sqrt(
+                Math.Pow(end.X - start.X, 2) +
+                Math.Pow(end.Y - start.Y, 2) +
+                Math.Pow(end.Z - start.Z, 2));
+            segments.Add(new ExportedContourSegment
+            {
+                StartPoint = start,
+                EndPoint = end,
+                ChamferType = "None",
+                ChamferX = 0,
+                ChamferY = 0,
                 Length = Math.Round(length, 4)
             });
         }
@@ -2167,6 +2354,814 @@ internal static class BodyBracketBundleExporter
         }
 
         return details;
+    }
+
+    private const double BevelTiltMinDeg = 8.0;
+    private const double BevelTiltMaxDeg = 82.0;
+
+    private static Dictionary<int, List<ModelObject>> IndexBevelObjectsByFather(Model model, HashSet<int> partIds)
+    {
+        var map = new Dictionary<int, List<ModelObject>>();
+        if (model == null || partIds == null || partIds.Count == 0)
+        {
+            return map;
+        }
+
+        ModelObjectSelector selector;
+        try
+        {
+            selector = model.GetModelObjectSelector();
+        }
+        catch
+        {
+            return map;
+        }
+
+        var types = new[]
+        {
+            ModelObject.ModelObjectEnum.EDGE_CHAMFER,
+            ModelObject.ModelObjectEnum.FITTING,
+            ModelObject.ModelObjectEnum.CUTPLANE
+        };
+
+        foreach (var type in types)
+        {
+            ModelObjectEnumerator objects;
+            try
+            {
+                objects = selector.GetAllObjectsWithType(type);
+            }
+            catch
+            {
+                continue;
+            }
+
+            while (objects != null && objects.MoveNext())
+            {
+                var current = objects.Current as Tekla.Structures.Model.Boolean;
+                if (current == null)
+                {
+                    continue;
+                }
+
+                Part father;
+                try
+                {
+                    father = current.Father as Part;
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (father == null)
+                {
+                    continue;
+                }
+
+                var fatherId = SafeGetIdentifier(father);
+                if (!partIds.Contains(fatherId))
+                {
+                    continue;
+                }
+
+                List<ModelObject> list;
+                if (!map.TryGetValue(fatherId, out list))
+                {
+                    list = new List<ModelObject>();
+                    map[fatherId] = list;
+                }
+
+                list.Add(current);
+            }
+        }
+
+        return map;
+    }
+
+    private static List<ExportedEdgeBevel> GetEdgeBevels(
+        Part part,
+        Vector plateNormal,
+        Vector longAxis,
+        string profileString,
+        bool isPlateLike,
+        double? partThickness,
+        GlobalBoundingBox plateBox,
+        List<ModelObject> extra,
+        out List<string> objectTypes,
+        out int endChamferCount)
+    {
+        var thicknessCandidates = BevelThicknessCandidates(profileString, partThickness, isPlateLike);
+        var details = new List<ExportedEdgeBevel>();
+        var typeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<int>();
+        var objects = new List<ModelObject>();
+        endChamferCount = 0;
+
+        AppendEnumerator(TryGetBooleans(part), seen, objects, typeNames);
+        CollectBooleanLikeRecursive(part, seen, objects, typeNames, 0);
+        if (extra != null)
+        {
+            foreach (var item in extra)
+            {
+                AddBooleanLike(item, seen, objects, typeNames);
+            }
+        }
+
+        foreach (var current in objects)
+        {
+            try
+            {
+                var edgeChamfer = current as EdgeChamfer;
+                if (edgeChamfer != null)
+                {
+                    details.Add(FromEdgeChamfer(edgeChamfer));
+                    continue;
+                }
+
+                var fitting = current as Fitting;
+                if (fitting != null)
+                {
+                    details.Add(FromPlaneBoolean("FITTING", fitting, fitting.Plane, plateNormal));
+                    continue;
+                }
+
+                var cutPlane = current as CutPlane;
+                if (cutPlane != null)
+                {
+                    details.Add(FromPlaneBoolean("CUT_PLANE", cutPlane, cutPlane.Plane, plateNormal));
+                    continue;
+                }
+
+                var booleanPart = current as BooleanPart;
+                if (booleanPart == null)
+                {
+                    continue;
+                }
+
+                var typeText = booleanPart.Type.ToString();
+                if (typeText.IndexOf("WELDPREP", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    details.Add(FromWeldPrep(booleanPart));
+                    continue;
+                }
+
+                if (typeText.IndexOf("cut", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var bevel = FromBooleanCutIfBevel(
+                        booleanPart,
+                        plateNormal,
+                        longAxis,
+                        isPlateLike,
+                        thicknessCandidates,
+                        plateBox);
+                    if (bevel != null)
+                    {
+                        details.Add(bevel);
+                    }
+                    else if (!isPlateLike && IsBooleanCutEndChamfer(
+                        booleanPart,
+                        plateNormal,
+                        longAxis,
+                        thicknessCandidates,
+                        plateBox))
+                    {
+                        endChamferCount++;
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        objectTypes = typeNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
+        return details;
+    }
+
+    private static ModelObjectEnumerator TryGetBooleans(Part part)
+    {
+        try
+        {
+            return part.GetBooleans();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void CollectBooleanLikeRecursive(
+        ModelObject parent,
+        HashSet<int> seen,
+        List<ModelObject> sink,
+        HashSet<string> typeNames,
+        int depth)
+    {
+        if (parent == null || depth > 3)
+        {
+            return;
+        }
+
+        ModelObjectEnumerator children;
+        try
+        {
+            children = parent.GetChildren();
+        }
+        catch
+        {
+            return;
+        }
+
+        while (children != null && children.MoveNext())
+        {
+            var child = children.Current as ModelObject;
+            if (child == null)
+            {
+                continue;
+            }
+
+            AddBooleanLike(child, seen, sink, typeNames);
+            if (child is Part)
+            {
+                continue;
+            }
+
+            CollectBooleanLikeRecursive(child, seen, sink, typeNames, depth + 1);
+        }
+    }
+
+    private static void AppendEnumerator(
+        ModelObjectEnumerator enumerator,
+        HashSet<int> seen,
+        List<ModelObject> sink,
+        HashSet<string> typeNames)
+    {
+        while (enumerator != null && enumerator.MoveNext())
+        {
+            AddBooleanLike(enumerator.Current as ModelObject, seen, sink, typeNames);
+        }
+    }
+
+    private static void AddBooleanLike(
+        ModelObject current,
+        HashSet<int> seen,
+        List<ModelObject> sink,
+        HashSet<string> typeNames)
+    {
+        if (current == null)
+        {
+            return;
+        }
+
+        var id = SafeGetIdentifier(current);
+        if (id != 0 && !seen.Add(id))
+        {
+            return;
+        }
+
+        try
+        {
+            typeNames.Add(current.GetType().Name);
+        }
+        catch
+        {
+        }
+
+        if (current is EdgeChamfer || current is Fitting || current is CutPlane || current is BooleanPart)
+        {
+            sink.Add(current);
+        }
+    }
+
+    private static ExportedEdgeBevel FromEdgeChamfer(EdgeChamfer edgeChamfer)
+    {
+        var item = new ExportedEdgeBevel
+        {
+            BooleanId = SafeGetIdentifier(edgeChamfer),
+            Kind = "EDGE_CHAMFER",
+            Name = edgeChamfer.Name ?? string.Empty,
+            IsBevel = true
+        };
+
+        try
+        {
+            item.FirstEnd = ToExportedVector3(edgeChamfer.FirstEnd);
+            item.SecondEnd = ToExportedVector3(edgeChamfer.SecondEnd);
+            item.FirstBevelDimension = Math.Round(edgeChamfer.FirstBevelDimension, 4);
+            item.SecondBevelDimension = Math.Round(edgeChamfer.SecondBevelDimension, 4);
+            item.FirstEndType = edgeChamfer.FirstChamferEndType.ToString();
+            item.SecondEndType = edgeChamfer.SecondChamferEndType.ToString();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            var chamfer = edgeChamfer.Chamfer;
+            if (chamfer != null)
+            {
+                item.ChamferType = chamfer.Type.ToString();
+                item.ChamferX = Math.Round(chamfer.X, 4);
+                item.ChamferY = Math.Round(chamfer.Y, 4);
+                item.Dz1 = Math.Round(chamfer.DZ1, 4);
+                item.Dz2 = Math.Round(chamfer.DZ2, 4);
+            }
+        }
+        catch
+        {
+        }
+
+        return item;
+    }
+
+    private static ExportedEdgeBevel FromWeldPrep(BooleanPart booleanPart)
+    {
+        var item = new ExportedEdgeBevel
+        {
+            BooleanId = SafeGetIdentifier(booleanPart),
+            Kind = "WELD_PREP",
+            ChamferType = booleanPart.Type.ToString(),
+            IsBevel = true
+        };
+
+        try
+        {
+            var operative = booleanPart.OperativePart;
+            if (operative != null)
+            {
+                item.OperativePartId = operative.Identifier.ID;
+            }
+        }
+        catch
+        {
+        }
+
+        return item;
+    }
+
+    private static ExportedEdgeBevel FromPlaneBoolean(string kind, ModelObject source, Plane plane, Vector plateNormal)
+    {
+        var item = new ExportedEdgeBevel
+        {
+            BooleanId = SafeGetIdentifier(source),
+            Kind = kind,
+            IsBevel = false
+        };
+
+        if (plane == null)
+        {
+            return item;
+        }
+
+        var planeNormal = Normalize(Cross(ToVector(plane.AxisX), ToVector(plane.AxisY)));
+        var angle = AngleBetweenAbsDeg(planeNormal, plateNormal);
+        item.PlaneOrigin = ToExportedVector3(plane.Origin);
+        item.PlaneNormal = ToExportedVector3(planeNormal);
+        item.AngleToPlateNormalDeg = Math.Round(angle, 4);
+        item.IsBevel = angle >= BevelTiltMinDeg && angle <= BevelTiltMaxDeg;
+        return item;
+    }
+
+    private static ExportedEdgeBevel FromBooleanCutIfBevel(
+        BooleanPart booleanPart,
+        Vector plateNormal,
+        Vector longAxis,
+        bool isPlateLike,
+        List<double> thicknesses,
+        GlobalBoundingBox plateBox)
+    {
+        Part operative;
+        try
+        {
+            operative = booleanPart.OperativePart;
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (operative == null)
+        {
+            return null;
+        }
+
+        Point min;
+        Point max;
+        try
+        {
+            var solid = operative.GetSolid();
+            min = solid.MinimumPoint;
+            max = solid.MaximumPoint;
+        }
+        catch
+        {
+            return null;
+        }
+
+        var cutBox = new GlobalBoundingBox(min, max);
+        if (!IsBooleanCutBevel(plateBox, cutBox, plateNormal, longAxis, isPlateLike, thicknesses))
+        {
+            return null;
+        }
+
+        var size = BoxSize(cutBox);
+        return new ExportedEdgeBevel
+        {
+            BooleanId = SafeGetIdentifier(booleanPart),
+            Kind = "BOOLEAN_CUT",
+            OperativePartId = operative.Identifier.ID,
+            ChamferX = Math.Round(Math.Abs(size.X), 4),
+            ChamferY = Math.Round(Math.Abs(size.Y), 4),
+            Dz1 = Math.Round(Math.Abs(size.Z), 4),
+            PlaneOrigin = ToExportedVector3(GetCenter(cutBox)),
+            IsBevel = true,
+            BoundingBox = new ExportedBoundingBox
+            {
+                Min = ToExportedVector3(min),
+                Max = ToExportedVector3(max)
+            }
+        };
+    }
+
+    private static bool IsBooleanCutBevel(
+        GlobalBoundingBox plate,
+        GlobalBoundingBox cut,
+        Vector plateNormal,
+        Vector longAxis,
+        bool isPlateLike,
+        List<double> thicknesses)
+    {
+        if (thicknesses != null)
+        {
+            foreach (var thickness in thicknesses)
+            {
+                if (IsRimWedgeCut(plate, cut, plateNormal, thickness))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return !isPlateLike && IsMemberEndBevelCut(plate, cut, longAxis, thicknesses);
+    }
+
+    private static bool IsRimWedgeCut(
+        GlobalBoundingBox plate,
+        GlobalBoundingBox cut,
+        Vector plateNormal,
+        double thickness)
+    {
+        if (plate == null || cut == null || thickness <= 1e-6)
+        {
+            return false;
+        }
+
+        var size = BoxSize(cut);
+        var dims = new[] { Math.Abs(size.X), Math.Abs(size.Y), Math.Abs(size.Z) };
+        Array.Sort(dims);
+        var thinLimit = (thickness * 2.5) + 8.0;
+        var shortLimit = (thickness * 4.0) + 10.0;
+        var longMin = Math.Max(thickness * 8.0, 80.0);
+        if (dims[0] > thinLimit || dims[1] > shortLimit || dims[2] < longMin)
+        {
+            return false;
+        }
+
+        var normal = Normalize(plateNormal);
+        var cutCenter = GetCenter(cut);
+        var rimTol = Math.Max(thickness * 2.0, 10.0);
+        var nComp = new[] { normal.X, normal.Y, normal.Z };
+        var plateMin = new[] { plate.Min.X, plate.Min.Y, plate.Min.Z };
+        var plateMax = new[] { plate.Max.X, plate.Max.Y, plate.Max.Z };
+        var cutC = new[] { cutCenter.X, cutCenter.Y, cutCenter.Z };
+        for (var i = 0; i < 3; i++)
+        {
+            if (Math.Abs(nComp[i]) > 0.75)
+            {
+                continue;
+            }
+
+            var dist = Math.Min(Math.Abs(cutC[i] - plateMin[i]), Math.Abs(cutC[i] - plateMax[i]));
+            if (dist <= rimTol)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static Vector BoxSize(GlobalBoundingBox box)
+    {
+        return new Vector(box.Max.X - box.Min.X, box.Max.Y - box.Min.Y, box.Max.Z - box.Min.Z);
+    }
+
+    private static bool IsMemberEndBevelCut(
+        GlobalBoundingBox plate,
+        GlobalBoundingBox cut,
+        Vector longAxis,
+        List<double> thicknesses)
+    {
+        if (plate == null || cut == null || thicknesses == null || thicknesses.Count == 0)
+        {
+            return false;
+        }
+
+        var tMin = thicknesses[0];
+        var tMax = thicknesses[0];
+        foreach (var thickness in thicknesses)
+        {
+            if (thickness < tMin) tMin = thickness;
+            if (thickness > tMax) tMax = thickness;
+        }
+
+        if (tMin <= 1e-6)
+        {
+            return false;
+        }
+
+        var along = ExtentAlong(cut, longAxis);
+        var alongMax = Math.Max(tMax * 8.0, 180.0);
+        if (along < (tMin * 0.4) || along > alongMax)
+        {
+            return false;
+        }
+
+        double plateMin;
+        double plateMax;
+        StationRange(plate, longAxis, out plateMin, out plateMax);
+        var cutStation = Station(GetCenter(cut), longAxis);
+        var endDist = Math.Min(Math.Abs(cutStation - plateMin), Math.Abs(cutStation - plateMax));
+        var endTol = Math.Max(tMax * 8.0, 250.0);
+        return endDist <= endTol;
+    }
+
+    private static bool IsBooleanCutEndChamfer(
+        BooleanPart booleanPart,
+        Vector plateNormal,
+        Vector longAxis,
+        List<double> thicknesses,
+        GlobalBoundingBox plateBox)
+    {
+        Part operative;
+        try
+        {
+            operative = booleanPart.OperativePart;
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (operative == null)
+        {
+            return false;
+        }
+
+        Point min;
+        Point max;
+        try
+        {
+            var solid = operative.GetSolid();
+            min = solid.MinimumPoint;
+            max = solid.MaximumPoint;
+        }
+        catch
+        {
+            return false;
+        }
+
+        return IsMemberEndChamferCut(plateBox, new GlobalBoundingBox(min, max), plateNormal, longAxis, thicknesses);
+    }
+
+    private static bool IsMemberEndChamferCut(
+        GlobalBoundingBox plate,
+        GlobalBoundingBox cut,
+        Vector plateNormal,
+        Vector longAxis,
+        List<double> thicknesses)
+    {
+        if (plate == null || cut == null)
+        {
+            return false;
+        }
+
+        var tMax = 10.0;
+        if (thicknesses != null && thicknesses.Count > 0)
+        {
+            tMax = thicknesses[0];
+            foreach (var thickness in thicknesses)
+            {
+                if (thickness > tMax) tMax = thickness;
+            }
+        }
+
+        if (tMax <= 1e-6)
+        {
+            return false;
+        }
+
+        var memberLen = ExtentAlong(plate, longAxis);
+        var along = ExtentAlong(cut, longAxis);
+        if (along < tMax || along > Math.Max(memberLen * 0.35, 80.0) || along > memberLen * 0.45)
+        {
+            return false;
+        }
+
+        double plateMin;
+        double plateMax;
+        StationRange(plate, longAxis, out plateMin, out plateMax);
+        var cutStation = Station(GetCenter(cut), longAxis);
+        var endDist = Math.Min(Math.Abs(cutStation - plateMin), Math.Abs(cutStation - plateMax));
+        var endTol = Math.Max(tMax * 8.0, 250.0);
+        if (endDist > endTol)
+        {
+            return false;
+        }
+
+        var cutCenter = GetCenter(cut);
+        var rimTol = Math.Max(tMax * 3.0, 40.0);
+        var normal = Normalize(plateNormal);
+        var nComp = new[] { normal.X, normal.Y, normal.Z };
+        var axis = Normalize(longAxis);
+        var aComp = new[] { axis.X, axis.Y, axis.Z };
+        var plateMinXYZ = new[] { plate.Min.X, plate.Min.Y, plate.Min.Z };
+        var plateMaxXYZ = new[] { plate.Max.X, plate.Max.Y, plate.Max.Z };
+        var cutC = new[] { cutCenter.X, cutCenter.Y, cutCenter.Z };
+        for (var i = 0; i < 3; i++)
+        {
+            if (Math.Abs(aComp[i]) > 0.75 || Math.Abs(nComp[i]) > 0.75)
+            {
+                continue;
+            }
+
+            var dist = Math.Min(Math.Abs(cutC[i] - plateMinXYZ[i]), Math.Abs(cutC[i] - plateMaxXYZ[i]));
+            if (dist <= rimTol)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static double ExtentAlong(GlobalBoundingBox box, Vector axis)
+    {
+        var direction = Normalize(axis);
+        var size = BoxSize(box);
+        return (Math.Abs(direction.X) * Math.Abs(size.X))
+            + (Math.Abs(direction.Y) * Math.Abs(size.Y))
+            + (Math.Abs(direction.Z) * Math.Abs(size.Z));
+    }
+
+    private static double Station(Point point, Vector axis)
+    {
+        var direction = Normalize(axis);
+        return Dot(new Vector(point.X, point.Y, point.Z), direction);
+    }
+
+    private static void StationRange(GlobalBoundingBox box, Vector axis, out double minStation, out double maxStation)
+    {
+        var xs = new[] { box.Min.X, box.Max.X };
+        var ys = new[] { box.Min.Y, box.Max.Y };
+        var zs = new[] { box.Min.Z, box.Max.Z };
+        minStation = double.PositiveInfinity;
+        maxStation = double.NegativeInfinity;
+        foreach (var x in xs)
+        {
+            foreach (var y in ys)
+            {
+                foreach (var z in zs)
+                {
+                    var value = Station(new Point(x, y, z), axis);
+                    if (value < minStation) minStation = value;
+                    if (value > maxStation) maxStation = value;
+                }
+            }
+        }
+    }
+
+    private static List<double> BevelThicknessCandidates(string profileString, double? partThickness, bool isPlateLike)
+    {
+        var result = new List<double>();
+        var spec = (profileString ?? string.Empty).Trim().ToUpperInvariant();
+        var nums = ParseProfileNumbers(spec);
+
+        if (spec.StartsWith("PL", StringComparison.Ordinal) || spec.StartsWith("FLAT", StringComparison.Ordinal))
+        {
+            if (nums.Count >= 1)
+            {
+                AddThicknessCandidate(result, nums[0]);
+            }
+        }
+        else
+        {
+            AddSectionWallThicknesses(result, nums);
+        }
+
+        if (isPlateLike && partThickness.HasValue)
+        {
+            AddThicknessCandidate(result, partThickness.Value);
+        }
+
+        if (result.Count == 0 && partThickness.HasValue && partThickness.Value <= 80.0)
+        {
+            AddThicknessCandidate(result, partThickness.Value);
+        }
+
+        return result;
+    }
+
+    private static void AddSectionWallThicknesses(List<double> result, List<double> nums)
+    {
+        if (nums == null || nums.Count == 0)
+        {
+            return;
+        }
+
+        AddThicknessCandidate(result, nums[nums.Count - 1]);
+        if (nums.Count >= 4)
+        {
+            AddThicknessCandidate(result, nums[2]);
+            AddThicknessCandidate(result, nums[3]);
+            return;
+        }
+
+        if (nums.Count >= 2)
+        {
+            var last = nums[nums.Count - 1];
+            var prev = nums[nums.Count - 2];
+            if (prev <= (last * 4.0) + 10.0)
+            {
+                AddThicknessCandidate(result, prev);
+            }
+        }
+    }
+
+    private static void AddThicknessCandidate(List<double> result, double thickness)
+    {
+        if (thickness <= 2.0 || thickness > 80.0)
+        {
+            return;
+        }
+
+        foreach (var existing in result)
+        {
+            if (Math.Abs(existing - thickness) <= 0.4)
+            {
+                return;
+            }
+        }
+
+        result.Add(thickness);
+    }
+
+    private static List<double> ParseProfileNumbers(string profileString)
+    {
+        var result = new List<double>();
+        if (string.IsNullOrWhiteSpace(profileString))
+        {
+            return result;
+        }
+
+        foreach (Match match in Regex.Matches(profileString, @"[0-9]+(?:\.[0-9]+)?"))
+        {
+            double value;
+            if (double.TryParse(match.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out value))
+            {
+                result.Add(value);
+            }
+        }
+
+        return result;
+    }
+
+    private static bool IsArcContourSegment(ExportedContourSegment segment)
+    {
+        var text = segment != null ? segment.ChamferType ?? string.Empty : string.Empty;
+        return text.IndexOf("ARC", StringComparison.OrdinalIgnoreCase) >= 0
+            || text.IndexOf("ROUNDING", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static double AngleBetweenAbsDeg(Vector left, Vector right)
+    {
+        var a = Normalize(left);
+        var b = Normalize(right);
+        var denom = Math.Sqrt(Dot(a, a) * Dot(b, b));
+        if (denom <= 1e-9)
+        {
+            return 90.0;
+        }
+
+        var cos = Math.Abs(Dot(a, b) / denom);
+        if (cos > 1.0)
+        {
+            cos = 1.0;
+        }
+
+        return Math.Acos(cos) * 180.0 / Math.PI;
     }
 
     // === 新增方法: 零件坐标系 ===

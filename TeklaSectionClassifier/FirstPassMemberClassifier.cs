@@ -981,7 +981,7 @@ public sealed class FirstPassMemberClassifier : IMemberClassifier
         {
             if (secondaryClass != SecondaryClass.HRegular)
             {
-                return "寮傚舰";
+                return "异形";
             }
 
             if (LooksLikeHProfile(profile))
@@ -1703,7 +1703,7 @@ public sealed class FirstPassMemberClassifier : IMemberClassifier
 
     private static bool HasCrossNameHint(string name)
     {
-        return !string.IsNullOrWhiteSpace(name) && name.IndexOf("鍗佸瓧", StringComparison.Ordinal) >= 0;
+        return !string.IsNullOrWhiteSpace(name) && name.IndexOf("十字", StringComparison.Ordinal) >= 0;
     }
 
 

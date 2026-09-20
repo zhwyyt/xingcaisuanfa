@@ -45,7 +45,7 @@ public sealed class DefaultSectionSampler : ISectionSampler
 
     private ResolvedStation ResolveStation(MemberSnapshot member, double ratio)
     {
-        var axisLength = member.Member.MainAxis.Length;
+        var axisLength = LongitudinalAxisResolver.GetAxisLength(member);
         var station = axisLength * ratio;
         if (!_anomalyDetector.IsAbnormalStation(member, station, out var reason))
         {

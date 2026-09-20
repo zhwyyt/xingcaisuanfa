@@ -8,13 +8,18 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
 {
     public SectionSample PopulateSample(MemberSnapshot member, SectionSample sample)
     {
-        var axis = Normalize(member.Member.MainAxis.Direction);
+        var stationFrame = LongitudinalAxisResolver.ResolveStationFrame(member, sample.Station);
+        var axis = Normalize(stationFrame.Direction);
         var sectionX = BuildSectionXAxis(axis);
         var sectionY = Cross(axis, sectionX);
 
         var activeParts = member.Parts
-            .Where(part => part.AxisProjection.Start <= sample.Station && part.AxisProjection.End >= sample.Station)
-            .Select(part => BuildHit(member, part, sample, axis, sectionX, sectionY))
+            .Where(part =>
+            {
+                var projection = LongitudinalAxisResolver.EstimatePartAxisProjection(member, part);
+                return projection.Start <= sample.Station && projection.End >= sample.Station;
+            })
+            .Select(part => BuildHit(member, part, sample, stationFrame.Origin, axis, sectionX, sectionY))
             .Where(hit => hit != null)
             .Cast<SectionPartHit>()
             .OrderBy(hit => hit.Center2D.Y)
@@ -26,23 +31,18 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         return sample;
     }
 
-    private static SectionPartHit? BuildHit(MemberSnapshot member, PartSnapshot part, SectionSample sample, Vector3D axis, Vector3D sectionX, Vector3D sectionY)
+    private static SectionPartHit? BuildHit(MemberSnapshot member, PartSnapshot part, SectionSample sample, Point3D planeOrigin, Vector3D axis, Vector3D sectionX, Vector3D sectionY)
     {
-        var solidHit = TryBuildSolidSectionHit(member, part, sample, axis, sectionX, sectionY);
-        return solidHit ?? BuildBoundingBoxSectionHit(member, part, sectionX, sectionY);
+        var solidHit = TryBuildSolidSectionHit(member, part, planeOrigin, axis, sectionX, sectionY);
+        return solidHit ?? BuildBoundingBoxSectionHit(member, part, planeOrigin, sectionX, sectionY);
     }
 
-    private static SectionPartHit? TryBuildSolidSectionHit(MemberSnapshot member, PartSnapshot part, SectionSample sample, Vector3D axis, Vector3D sectionX, Vector3D sectionY)
+    private static SectionPartHit? TryBuildSolidSectionHit(MemberSnapshot member, PartSnapshot part, Point3D planeOrigin, Vector3D axis, Vector3D sectionX, Vector3D sectionY)
     {
         if (part.SolidEdges == null || part.SolidEdges.Count == 0)
         {
             return null;
         }
-
-        var planeOrigin = new Point3D(
-            member.Member.MainAxis.Origin.X + axis.X * sample.Station,
-            member.Member.MainAxis.Origin.Y + axis.Y * sample.Station,
-            member.Member.MainAxis.Origin.Z + axis.Z * sample.Station);
 
         var points = new List<Point3D>();
         foreach (var edge in part.SolidEdges)
@@ -59,7 +59,7 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         }
 
         var projected = points
-            .Select(point => ProjectToSection(member, point, sectionX, sectionY))
+            .Select(point => ProjectToSection(planeOrigin, point, sectionX, sectionY))
             .ToList();
         var minX = projected.Min(point => point.X);
         var maxX = projected.Max(point => point.X);
@@ -90,12 +90,12 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         };
     }
 
-    private static SectionPartHit BuildBoundingBoxSectionHit(MemberSnapshot member, PartSnapshot part, Vector3D sectionX, Vector3D sectionY)
+    private static SectionPartHit BuildBoundingBoxSectionHit(MemberSnapshot member, PartSnapshot part, Point3D planeOrigin, Vector3D sectionX, Vector3D sectionY)
     {
         var relative = new Vector3D(
-            part.Centroid.X - member.Member.MainAxis.Origin.X,
-            part.Centroid.Y - member.Member.MainAxis.Origin.Y,
-            part.Centroid.Z - member.Member.MainAxis.Origin.Z);
+            part.Centroid.X - planeOrigin.X,
+            part.Centroid.Y - planeOrigin.Y,
+            part.Centroid.Z - planeOrigin.Z);
 
         var centerX = Dot(relative, sectionX);
         var centerY = Dot(relative, sectionY);
@@ -131,20 +131,20 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         var maxY = hits.Max(hit => hit.Center2D.Y + (GetSpanY(hit) / 2.0));
         var flangeCandidates = hits.Count(hit => hit.RoleHint == "flange_candidate");
         var webCandidates = hits.Count(hit => hit.RoleHint == "web_candidate");
-        var wallCandidates = hits.Count(hit => hit.RoleHint == "wall_candidate");
+        var enclosure = ComputeEnclosureEvidence(hits, minX, maxX, minY, maxY);
 
         return new SectionFeatures
         {
-            ClosedLoops = wallCandidates >= 4 ? 1 : 0,
+            ClosedLoops = enclosure.HasClosedLoop ? 1 : 0,
             MajorPlateCount = hits.Count(hit => hit.RoleHint != "stiffener_candidate"),
             OuterWidth = Math.Max(0.0, maxX - minX),
             OuterHeight = Math.Max(0.0, maxY - minY),
-            CavityCount = wallCandidates >= 4 ? 1 : 0,
+            CavityCount = enclosure.HasClosedLoop ? 1 : 0,
             HorizontalSymmetryScore = ComputeSymmetryScore(hits, horizontal: true),
             VerticalSymmetryScore = ComputeSymmetryScore(hits, horizontal: false),
             CentralVerticalPlateCount = webCandidates,
             CentralHorizontalPlateCount = flangeCandidates,
-            EnclosureScore = ComputeEnclosureScore(flangeCandidates, webCandidates, wallCandidates)
+            EnclosureScore = enclosure.Score
         };
     }
 
@@ -172,19 +172,152 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         return (double)matched / hits.Count;
     }
 
-    private static double ComputeEnclosureScore(int flangeCandidates, int webCandidates, int wallCandidates)
+    private static EnclosureEvidence ComputeEnclosureEvidence(
+        IReadOnlyList<SectionPartHit> hits,
+        double minX,
+        double maxX,
+        double minY,
+        double maxY)
     {
-        if (wallCandidates >= 4)
+        var majorHits = hits
+            .Where(hit => hit.RoleHint != "stiffener_candidate" && hit.RoleHint != "direct_profile_body")
+            .Select(ToRect)
+            .ToArray();
+        if (majorHits.Length == 0)
         {
-            return 1.0;
+            return EnclosureEvidence.Empty;
         }
 
-        if (flangeCandidates >= 2 && webCandidates >= 1)
+        var outerWidth = Math.Max(0.0, maxX - minX);
+        var outerHeight = Math.Max(0.0, maxY - minY);
+        var tolerance = Math.Max(
+            10.0,
+            majorHits.Max(hit => Math.Max(ResolveThickness(hit), Math.Min(hit.Width, hit.Height))) * 1.1);
+        var minHorizontalSpan = outerWidth * 0.45;
+        var minVerticalSpan = outerHeight * 0.45;
+        var top = majorHits.Where(hit => hit.CanActAsHorizontalBoundary && Math.Abs(hit.MaxY - maxY) <= tolerance && hit.Width >= minHorizontalSpan).ToArray();
+        var bottom = majorHits.Where(hit => hit.CanActAsHorizontalBoundary && Math.Abs(hit.MinY - minY) <= tolerance && hit.Width >= minHorizontalSpan).ToArray();
+        var left = majorHits.Where(hit => hit.CanActAsVerticalBoundary && Math.Abs(hit.MinX - minX) <= tolerance && hit.Height >= minVerticalSpan).ToArray();
+        var right = majorHits.Where(hit => hit.CanActAsVerticalBoundary && Math.Abs(hit.MaxX - maxX) <= tolerance && hit.Height >= minVerticalSpan).ToArray();
+
+        var boundarySupportCount =
+            (top.Length > 0 ? 1 : 0) +
+            (bottom.Length > 0 ? 1 : 0) +
+            (left.Length > 0 ? 1 : 0) +
+            (right.Length > 0 ? 1 : 0);
+        var boundaryCoverageScore = boundarySupportCount / 4.0;
+
+        var hasClosedLoop =
+            top.Length > 0 &&
+            bottom.Length > 0 &&
+            left.Length > 0 &&
+            right.Length > 0 &&
+            HasCornerTouch(top, left, tolerance) &&
+            HasCornerTouch(top, right, tolerance) &&
+            HasCornerTouch(bottom, left, tolerance) &&
+            HasCornerTouch(bottom, right, tolerance);
+
+        if (hasClosedLoop)
         {
-            return 0.45;
+            return new EnclosureEvidence(true, 1.0, BuildOuterLoopFromBoundaries(top, bottom, left, right), "sectionBoundaryHits.v1");
         }
 
-        return 0.1;
+        return new EnclosureEvidence(false, boundaryCoverageScore * 0.3, new List<Point2D>(), string.Empty);
+    }
+
+
+    private static List<Point2D> BuildOuterLoopFromBoundaries(
+        IReadOnlyList<SectionRect> top,
+        IReadOnlyList<SectionRect> bottom,
+        IReadOnlyList<SectionRect> left,
+        IReadOnlyList<SectionRect> right)
+    {
+        var topBoundary = MergeBoundary(top);
+        var bottomBoundary = MergeBoundary(bottom);
+        var leftBoundary = MergeBoundary(left);
+        var rightBoundary = MergeBoundary(right);
+        var minX = Math.Min(leftBoundary.MinX, Math.Min(topBoundary.MinX, bottomBoundary.MinX));
+        var maxX = Math.Max(rightBoundary.MaxX, Math.Max(topBoundary.MaxX, bottomBoundary.MaxX));
+        var minY = Math.Min(bottomBoundary.MinY, Math.Min(leftBoundary.MinY, rightBoundary.MinY));
+        var maxY = Math.Max(topBoundary.MaxY, Math.Max(leftBoundary.MaxY, rightBoundary.MaxY));
+
+        return new List<Point2D>
+        {
+            new Point2D(Math.Round(minX, 6), Math.Round(minY, 6)),
+            new Point2D(Math.Round(maxX, 6), Math.Round(minY, 6)),
+            new Point2D(Math.Round(maxX, 6), Math.Round(maxY, 6)),
+            new Point2D(Math.Round(minX, 6), Math.Round(maxY, 6))
+        };
+    }
+
+    private static SectionRect MergeBoundary(IReadOnlyList<SectionRect> rects)
+    {
+        return new SectionRect(
+            rects.Min(rect => rect.MinX),
+            rects.Max(rect => rect.MaxX),
+            rects.Min(rect => rect.MinY),
+            rects.Max(rect => rect.MaxY),
+            rects.Sum(rect => Math.Max(0.0, rect.Width)),
+            rects.Sum(rect => Math.Max(0.0, rect.Height)),
+            rects.Max(rect => rect.Thickness),
+            rects.Any(rect => rect.CanActAsHorizontalBoundary),
+            rects.Any(rect => rect.CanActAsVerticalBoundary));
+    }
+    private static SectionRect ToRect(SectionPartHit hit)
+    {
+        var spanX = GetSpanX(hit);
+        var spanY = GetSpanY(hit);
+        var canActAsHorizontalBoundary =
+            string.Equals(hit.RoleHint, "flange_candidate", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(hit.RoleHint, "wall_candidate", StringComparison.OrdinalIgnoreCase) ||
+            spanX >= spanY * 1.1;
+        var canActAsVerticalBoundary =
+            string.Equals(hit.RoleHint, "web_candidate", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(hit.RoleHint, "wall_candidate", StringComparison.OrdinalIgnoreCase) ||
+            spanY >= spanX * 1.1;
+        return new SectionRect(
+            hit.Center2D.X - spanX / 2.0,
+            hit.Center2D.X + spanX / 2.0,
+            hit.Center2D.Y - spanY / 2.0,
+            hit.Center2D.Y + spanY / 2.0,
+            spanX,
+            spanY,
+            hit.Thickness,
+            canActAsHorizontalBoundary,
+            canActAsVerticalBoundary);
+    }
+
+    private static bool HasCornerTouch(IReadOnlyList<SectionRect> horizontals, IReadOnlyList<SectionRect> verticals, double tolerance)
+    {
+        foreach (var horizontal in horizontals)
+        {
+            foreach (var vertical in verticals)
+            {
+                if (RectsTouch(horizontal, vertical, tolerance))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool RectsTouch(SectionRect a, SectionRect b, double tolerance)
+    {
+        var overlapX = Math.Min(a.MaxX + tolerance, b.MaxX + tolerance) - Math.Max(a.MinX - tolerance, b.MinX - tolerance);
+        var overlapY = Math.Min(a.MaxY + tolerance, b.MaxY + tolerance) - Math.Max(a.MinY - tolerance, b.MinY - tolerance);
+        return overlapX >= 0.0 && overlapY >= 0.0;
+    }
+
+    private static double ResolveThickness(SectionRect rect)
+    {
+        if (rect.Thickness > 1e-6)
+        {
+            return rect.Thickness;
+        }
+
+        return Math.Min(rect.Width, rect.Height);
     }
 
     private static string InferRoleHint(PartSnapshot part, double spanX, double spanY)
@@ -327,12 +460,12 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         points.Add(candidate);
     }
 
-    private static Point2D ProjectToSection(MemberSnapshot member, Point3D point, Vector3D sectionX, Vector3D sectionY)
+    private static Point2D ProjectToSection(Point3D planeOrigin, Point3D point, Vector3D sectionX, Vector3D sectionY)
     {
         var relative = new Vector3D(
-            point.X - member.Member.MainAxis.Origin.X,
-            point.Y - member.Member.MainAxis.Origin.Y,
-            point.Z - member.Member.MainAxis.Origin.Z);
+            point.X - planeOrigin.X,
+            point.Y - planeOrigin.Y,
+            point.Z - planeOrigin.Z);
         return new Point2D(Dot(relative, sectionX), Dot(relative, sectionY));
     }
 
@@ -412,6 +545,50 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         return false;
     }
 
+
+    private readonly struct EnclosureEvidence
+    {
+        public EnclosureEvidence(bool hasClosedLoop, double score, List<Point2D> outerLoop, string evidenceSource)
+        {
+            HasClosedLoop = hasClosedLoop;
+            Score = score;
+            OuterLoop = outerLoop;
+            EvidenceSource = evidenceSource;
+        }
+
+        public bool HasClosedLoop { get; }
+        public double Score { get; }
+        public List<Point2D> OuterLoop { get; }
+        public string EvidenceSource { get; }
+
+        public static EnclosureEvidence Empty => new EnclosureEvidence(false, 0.0, new List<Point2D>(), string.Empty);
+    }
+    private readonly struct SectionRect
+    {
+        public SectionRect(double minX, double maxX, double minY, double maxY, double width, double height, double thickness, bool canActAsHorizontalBoundary, bool canActAsVerticalBoundary)
+        {
+            MinX = minX;
+            MaxX = maxX;
+            MinY = minY;
+            MaxY = maxY;
+            Width = width;
+            Height = height;
+            Thickness = thickness;
+            CanActAsHorizontalBoundary = canActAsHorizontalBoundary;
+            CanActAsVerticalBoundary = canActAsVerticalBoundary;
+        }
+
+        public double MinX { get; }
+        public double MaxX { get; }
+        public double MinY { get; }
+        public double MaxY { get; }
+        public double Width { get; }
+        public double Height { get; }
+        public double Thickness { get; }
+        public bool CanActAsHorizontalBoundary { get; }
+        public bool CanActAsVerticalBoundary { get; }
+    }
+
     private static List<double> ExtractNumbers(string text)
     {
         var numbers = new List<double>();
@@ -484,6 +661,7 @@ public sealed class ApproximateSectionIntersectionService : ISectionIntersection
         return new Vector3D(vector.X / length, vector.Y / length, vector.Z / length);
     }
 }
+
 
 
 

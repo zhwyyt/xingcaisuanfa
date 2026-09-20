@@ -25,11 +25,22 @@ internal static class Program
                 return RunOfflineReclassification(options);
             }
 
+            EnsureTeklaSessionName();
             var model = new Model();
             if (!model.GetConnectionStatus())
             {
                 Console.Error.WriteLine("未连接到 Tekla 模型。请先打开 Tekla 2017 模型后再运行。");
                 return 2;
+            }
+
+            if (options.ExportWeb3D)
+            {
+                Directory.CreateDirectory(options.OutputDirectory);
+                var result = Web3DExporter.Write(model, options.OutputDirectory);
+                Console.WriteLine($"Web3D 导出完成: {result.PartCount} 个零件");
+                Console.WriteLine($"模型文件: {result.ModelPath}");
+                Console.WriteLine($"元数据文件: {result.ComponentsPath}");
+                return 0;
             }
 
             Directory.CreateDirectory(options.OutputDirectory);
@@ -57,9 +68,11 @@ internal static class Program
             var jsonDir = Path.Combine(options.OutputDirectory, "members");
             var sqlitePath = options.EnableSqlite ? Path.Combine(options.OutputDirectory, "tekla_members.db") : string.Empty;
             var batch = pipeline.Run(jsonDir, sqlitePath, ReportProgress);
+            var bundlePath = BodyBracketBundleExporter.Write(model, options.OutputDirectory);
 
             Console.WriteLine($"导出完成: {batch.Members.Count} 根构件");
             Console.WriteLine($"JSON目录: {jsonDir}");
+            Console.WriteLine($"Body/Bracket Bundle: {bundlePath}");
             if (options.EnableSqlite && !string.IsNullOrWhiteSpace(sqlitePath) && File.Exists(sqlitePath))
             {
                 Console.WriteLine($"SQLite: {sqlitePath}");
@@ -72,6 +85,16 @@ internal static class Program
             Console.Error.WriteLine(ex.ToString());
             return 1;
         }
+    }
+
+    private static void EnsureTeklaSessionName()
+    {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SESSIONNAME")))
+        {
+            return;
+        }
+
+        Environment.SetEnvironmentVariable("SESSIONNAME", "Console", EnvironmentVariableTarget.Process);
     }
 
     private static int RunOfflineReclassification(RunnerOptions options)
@@ -574,6 +597,7 @@ internal sealed class RunnerOptions
     public bool EnableSqlite { get; set; }
     public string SqliteProviderPath { get; set; } = string.Empty;
     public string ReclassifyCacheDirectory { get; set; } = string.Empty;
+    public bool ExportWeb3D { get; set; }
 
     public static RunnerOptions Parse(IReadOnlyList<string> args)
     {
@@ -583,7 +607,8 @@ internal sealed class RunnerOptions
             MemberPrefixFilter = string.Empty,
             EnableSqlite = false,
             SqliteProviderPath = string.Empty,
-            ReclassifyCacheDirectory = string.Empty
+            ReclassifyCacheDirectory = string.Empty,
+            ExportWeb3D = false
         };
 
         for (var i = 0; i < args.Count; i++)
@@ -617,6 +642,12 @@ internal sealed class RunnerOptions
             if (arg.Equals("--reclassify-cache", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Count)
             {
                 options.ReclassifyCacheDirectory = args[++i];
+                continue;
+            }
+
+            if (arg.Equals("--export-web3d", StringComparison.OrdinalIgnoreCase))
+            {
+                options.ExportWeb3D = true;
                 continue;
             }
         }

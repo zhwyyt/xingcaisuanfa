@@ -20,6 +20,11 @@ public sealed class ModelInfo
 public sealed class MemberSnapshot
 {
     public MemberIdentity Member { get; set; } = new MemberIdentity();
+    public string LongitudinalAxisKind { get; set; } = "STRAIGHT";
+    public List<Point3D> GuidePolyline { get; set; } = new List<Point3D>();
+    public List<LongitudinalAxisSegment> AxisSegments { get; set; } = new List<LongitudinalAxisSegment>();
+    public double LongitudinalAxisConfidence { get; set; } = 1.0;
+    public string LongitudinalAxisSource { get; set; } = "MAIN_AXIS";
     public List<PartSnapshot> Parts { get; set; } = new List<PartSnapshot>();
     public List<SectionSample> Samples { get; set; } = new List<SectionSample>();
     public PreClassificationSnapshot PreClassification { get; set; } = new PreClassificationSnapshot();
@@ -48,6 +53,17 @@ public sealed class AxisDefinition
     public double Length { get; set; }
 }
 
+public sealed class LongitudinalAxisSegment
+{
+    public int Index { get; set; }
+    public Point3D Start { get; set; } = new Point3D();
+    public Point3D End { get; set; } = new Point3D();
+    public Vector3D Direction { get; set; } = new Vector3D(1, 0, 0);
+    public double Length { get; set; }
+    public double CumulativeStart { get; set; }
+    public double CumulativeEnd { get; set; }
+}
+
 public sealed class PartSnapshot
 {
     public string PartId { get; set; } = string.Empty;
@@ -67,6 +83,7 @@ public sealed class PartSnapshot
     public EndProximity EndProximity { get; set; } = new EndProximity();
     public GeometryHints GeometryHints { get; set; } = new GeometryHints();
     public TopologyHints TopologyHints { get; set; } = new TopologyHints();
+    internal PartInputLayerDraftMetadata InputLayerDraft { get; set; } = new PartInputLayerDraftMetadata();
 }
 
 public sealed class AxisProjection
@@ -135,6 +152,9 @@ public sealed class SectionFeatures
     public int CentralVerticalPlateCount { get; set; }
     public int CentralHorizontalPlateCount { get; set; }
     public double EnclosureScore { get; set; }
+    public List<Point2D> OuterLoop { get; set; } = new List<Point2D>();
+    public List<List<Point2D>> InnerLoops { get; set; } = new List<List<Point2D>>();
+    public string SectionLoopEvidenceSource { get; set; } = string.Empty;
 }
 
 public sealed class PreClassificationSnapshot
@@ -157,6 +177,31 @@ public sealed class MemberClassCandidate
     public double Score { get; set; }
     public string Reason { get; set; } = string.Empty;
 }
+
+internal sealed class PartInputLayerDraftMetadata
+{
+    public string PartModelType { get; set; } = "PATH_SECTION_SWEEP";
+    public string RepresentationKind { get; set; } = "PATH_SECTION_SWEEP";
+    public string RepresentationLevel { get; set; } = "EXACT";
+    public string DistortionRiskCode { get; set; } = "LOW";
+    public double? Thickness { get; set; }
+    public string ThicknessSource { get; set; } = "UNKNOWN";
+    public string ThicknessSourceDetail { get; set; } = string.Empty;
+    public string BoundaryLoopKind { get; set; } = "UNRESOLVED";
+    public string BoundarySource { get; set; } = "NONE";
+    public bool BoundaryClosed { get; set; }
+    public string LocalFrameSource { get; set; } = "PART_COORDINATE_SYSTEM";
+    public string SectionSource { get; set; } = string.Empty;
+    public string SectionProfile { get; set; } = string.Empty;
+    public bool HasExplicitBoundary { get; set; }
+    public bool HasExplicitThickness { get; set; }
+    public bool HasExplicitSection { get; set; }
+    public List<Point3D> BoundaryPoints { get; } = new List<Point3D>();
+    public List<string> WarningCodes { get; } = new List<string>();
+    public List<string> DistortionRiskReasons { get; } = new List<string>();
+    public List<string> DegradationReasonCodes { get; } = new List<string>();
+}
+
 
 
 

@@ -14,7 +14,7 @@ public sealed class DefaultAnomalyDetector : IAnomalyDetector
 
     public bool IsAbnormalStation(MemberSnapshot member, double station, out string reason)
     {
-        var axisLength = member.Member.MainAxis.Length;
+        var axisLength = LongitudinalAxisResolver.GetAxisLength(member);
         if (axisLength <= 0.0)
         {
             reason = "invalid_axis_length";
@@ -34,12 +34,15 @@ public sealed class DefaultAnomalyDetector : IAnomalyDetector
         }
 
         var localParts = member.Parts.Where(part =>
-                part.AxisProjection.Length > 0.0 &&
-                part.AxisProjection.Start <= station &&
-                part.AxisProjection.End >= station)
+            {
+                var projection = LongitudinalAxisResolver.EstimatePartAxisProjection(member, part);
+                return projection.Length > 0.0 &&
+                       projection.Start <= station &&
+                       projection.End >= station;
+            })
             .ToList();
 
-        var shortCoverageCount = localParts.Count(part => part.AxisProjection.CoverageRatio < 0.20);
+        var shortCoverageCount = localParts.Count(part => LongitudinalAxisResolver.EstimatePartAxisProjection(member, part).CoverageRatio < 0.20);
         if (shortCoverageCount >= 3)
         {
             reason = "dense_attachment_zone";
@@ -47,7 +50,7 @@ public sealed class DefaultAnomalyDetector : IAnomalyDetector
         }
 
         var wideDisturbanceCount = localParts.Count(part =>
-            part.AxisProjection.CoverageRatio < 0.35 &&
+            LongitudinalAxisResolver.EstimatePartAxisProjection(member, part).CoverageRatio < 0.35 &&
             (part.GeometryHints.IsBentLike || part.GeometryHints.IsFoldedLike || part.Thickness > 0.0));
         if (wideDisturbanceCount >= 4)
         {

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 
 namespace TeklaSectionClassifier;
 
@@ -41,7 +43,7 @@ public sealed class FirstPassPartRoleScorer : IPartRoleScorer
         var secondary = dims[1];
         var tertiary = dims[2];
         var coverage = part.AxisProjection.CoverageRatio;
-        var thickness = part.Thickness;
+        var thickness = ResolveEffectiveThickness(part);
 
         if (coverage >= 0.70)
         {
@@ -99,5 +101,86 @@ public sealed class FirstPassPartRoleScorer : IPartRoleScorer
             Score = bestScore,
             Reason = bestReason
         };
+    }
+
+    private static double ResolveEffectiveThickness(PartSnapshot part)
+    {
+        if (part.Thickness > 0)
+        {
+            return part.Thickness;
+        }
+
+        return TryParseThicknessFromProfile(part.ProfileString, out var profileThickness)
+            ? profileThickness
+            : 0.0;
+    }
+
+    private static bool TryParseThicknessFromProfile(string profile, out double thickness)
+    {
+        thickness = 0.0;
+        if (string.IsNullOrWhiteSpace(profile))
+        {
+            return false;
+        }
+
+        var normalized = profile.Replace(" ", string.Empty).ToUpperInvariant();
+        var numbers = ExtractNumbers(normalized);
+        if (numbers.Count == 0)
+        {
+            return false;
+        }
+
+        if (normalized.StartsWith("PL", StringComparison.OrdinalIgnoreCase))
+        {
+            thickness = numbers[0];
+            return thickness > 0;
+        }
+
+        if (normalized.StartsWith("RHS", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("SHS", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("BOX", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("PIPE", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("CHS", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("ROD", StringComparison.OrdinalIgnoreCase))
+        {
+            thickness = numbers[numbers.Count - 1];
+            return thickness > 0;
+        }
+
+        return false;
+    }
+
+    private static List<double> ExtractNumbers(string text)
+    {
+        var numbers = new List<double>();
+        var buffer = new StringBuilder();
+        foreach (var ch in text)
+        {
+            if ((ch >= '0' && ch <= '9') || ch == '.')
+            {
+                buffer.Append(ch);
+                continue;
+            }
+
+            FlushNumber(buffer, numbers);
+        }
+
+        FlushNumber(buffer, numbers);
+        return numbers;
+    }
+
+    private static void FlushNumber(StringBuilder buffer, List<double> numbers)
+    {
+        if (buffer.Length == 0)
+        {
+            return;
+        }
+
+        if (double.TryParse(buffer.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+        {
+            numbers.Add(value);
+        }
+
+        buffer.Clear();
     }
 }

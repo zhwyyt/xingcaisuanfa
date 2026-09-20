@@ -52,6 +52,26 @@ dotnet run --project .\TeklaSectionClassifier.Runner\TeklaSectionClassifier.Runn
 dotnet run --project .\TeklaSectionClassifier.Runner\TeklaSectionClassifier.Runner.csproj -- --output I:\xingcaisuanfa\cache\run_selected_1 --prefix B
 ```
 
+导出给 Web3D 查看器使用的模型和元数据时：
+
+```powershell
+dotnet run --project .\TeklaSectionClassifier.Runner\TeklaSectionClassifier.Runner.csproj -- --output I:\xingcaisuanfa\cache\run_web3d_1 --export-web3d
+```
+
+该命令会在输出目录中生成：
+
+- `web3d-model.gltf`
+- `web3d-components.json`
+- `web3d-reference.json`
+- `README-web3d-export.txt`
+
+其中：
+
+- `web3d-model.gltf` 是可直接给浏览器查看器加载的模型文件
+- `web3d-components.json` 包含构件 `teklaGuid / name / profile / material / partMark`
+- `web3d-reference.json` 包含轴网、标高线、轴网交点以及轴网+标高三维交点，可用于多模型重定位
+- 当前模式同样默认只处理 Tekla 中已选中的 assembly 或其零件
+
 ## 离线重跑分类
 
 当 `member_*.json` 已经导出完成后，可以不打开 Tekla，直接对缓存重算分类：

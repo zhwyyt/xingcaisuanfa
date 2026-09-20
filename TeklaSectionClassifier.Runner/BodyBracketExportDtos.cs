@@ -7,7 +7,7 @@ namespace TeklaSectionClassifier.Runner;
 internal sealed class ExportBundle
 {
     [DataMember(Name = "schemaVersion", Order = 1)]
-    public string SchemaVersion { get; set; } = "tekla-body-bracket-export.v2-enhanced";
+    public string SchemaVersion { get; set; } = "tekla-body-bracket-export.v2-plate-face";
 
     [DataMember(Name = "exportedAtUtc", Order = 2)]
     public string ExportedAtUtc { get; set; } = string.Empty;
@@ -29,7 +29,7 @@ internal sealed class ExportSourceInfo
     public string SelectionMode { get; set; } = "selected";
 
     [DataMember(Name = "exporterVersion", Order = 3)]
-    public string ExporterVersion { get; set; } = "xingcai-runner-body-bracket-0.1.0";
+    public string ExporterVersion { get; set; } = "xingcai-runner-body-bracket-0.3.2-plate-face";
 }
 
 [DataContract]
@@ -429,6 +429,25 @@ internal sealed class ExportedPart
 
     [DataMember(Name = "mainMaterialEvidence", EmitDefaultValue = false, Order = 33)]
     public ExportedMainMaterialEvidence MainMaterialEvidence { get; set; } = new ExportedMainMaterialEvidence();
+
+    // 剖口：EdgeChamfer / 焊缝坡口 / 相对板厚倾斜的 Fitting、CutPlane。不是轮廓倒角。
+    [DataMember(Name = "edgeBevels", EmitDefaultValue = false, Order = 34)]
+    public List<ExportedEdgeBevel> EdgeBevels { get; set; } = new List<ExportedEdgeBevel>();
+
+    [DataMember(Name = "edgeBevelCount", Order = 35)]
+    public int EdgeBevelCount { get; set; }
+
+    [DataMember(Name = "hasEdgeBevel", Order = 36)]
+    public bool HasEdgeBevel { get; set; }
+
+    [DataMember(Name = "booleanObjectTypes", EmitDefaultValue = false, Order = 37)]
+    public List<string> BooleanObjectTypes { get; set; } = new List<string>();
+
+    [DataMember(Name = "endChamferCount", Order = 38)]
+    public int EndChamferCount { get; set; }
+
+    [DataMember(Name = "hasEndChamfer", Order = 39)]
+    public bool HasEndChamfer { get; set; }
 }
 
 
@@ -721,6 +740,70 @@ internal sealed class ExportedBooleanCut
     public string CutType { get; set; } = string.Empty;  // Cut/Fit
 
     [DataMember(Name = "boundingBox", Order = 3)]
+    public ExportedBoundingBox BoundingBox { get; set; } = new ExportedBoundingBox();
+}
+
+[DataContract]
+internal sealed class ExportedEdgeBevel
+{
+    [DataMember(Name = "booleanId", Order = 1)]
+    public int BooleanId { get; set; }
+
+    [DataMember(Name = "kind", Order = 2)]
+    public string Kind { get; set; } = string.Empty;
+
+    [DataMember(Name = "operativePartId", Order = 3)]
+    public int OperativePartId { get; set; }
+
+    [DataMember(Name = "name", EmitDefaultValue = false, Order = 4)]
+    public string Name { get; set; } = string.Empty;
+
+    [DataMember(Name = "chamferType", EmitDefaultValue = false, Order = 5)]
+    public string ChamferType { get; set; } = string.Empty;
+
+    [DataMember(Name = "chamferX", Order = 6)]
+    public double ChamferX { get; set; }
+
+    [DataMember(Name = "chamferY", Order = 7)]
+    public double ChamferY { get; set; }
+
+    [DataMember(Name = "dz1", Order = 8)]
+    public double Dz1 { get; set; }
+
+    [DataMember(Name = "dz2", Order = 9)]
+    public double Dz2 { get; set; }
+
+    [DataMember(Name = "firstBevelDimension", Order = 10)]
+    public double FirstBevelDimension { get; set; }
+
+    [DataMember(Name = "secondBevelDimension", Order = 11)]
+    public double SecondBevelDimension { get; set; }
+
+    [DataMember(Name = "firstEndType", EmitDefaultValue = false, Order = 12)]
+    public string FirstEndType { get; set; } = string.Empty;
+
+    [DataMember(Name = "secondEndType", EmitDefaultValue = false, Order = 13)]
+    public string SecondEndType { get; set; } = string.Empty;
+
+    [DataMember(Name = "firstEnd", EmitDefaultValue = false, Order = 14)]
+    public ExportedVector3 FirstEnd { get; set; } = new ExportedVector3();
+
+    [DataMember(Name = "secondEnd", EmitDefaultValue = false, Order = 15)]
+    public ExportedVector3 SecondEnd { get; set; } = new ExportedVector3();
+
+    [DataMember(Name = "planeOrigin", EmitDefaultValue = false, Order = 16)]
+    public ExportedVector3 PlaneOrigin { get; set; } = new ExportedVector3();
+
+    [DataMember(Name = "planeNormal", EmitDefaultValue = false, Order = 17)]
+    public ExportedVector3 PlaneNormal { get; set; } = new ExportedVector3();
+
+    [DataMember(Name = "angleToPlateNormalDeg", Order = 18)]
+    public double AngleToPlateNormalDeg { get; set; }
+
+    [DataMember(Name = "isBevel", Order = 19)]
+    public bool IsBevel { get; set; }
+
+    [DataMember(Name = "boundingBox", EmitDefaultValue = false, Order = 20)]
     public ExportedBoundingBox BoundingBox { get; set; } = new ExportedBoundingBox();
 }
 
