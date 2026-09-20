@@ -14,13 +14,78 @@ namespace TeklaSectionClassifier.Runner;
 
 internal static class BodyBracketBundleExporter
 {
-    private const string ExporterVersion = "xingcai-runner-body-bracket-0.3.3-index-once";
+    private const string ExporterVersion = "xingcai-runner-body-bracket-0.3.5-solid-cache";
 
     private sealed class PartObjectCache
     {
         public List<BooleanPart> Booleans { get; } = new List<BooleanPart>();
         public List<BoltGroup> Bolts { get; } = new List<BoltGroup>();
         public List<BaseWeld> Welds { get; } = new List<BaseWeld>();
+    }
+
+    private sealed class WorldSolidCache
+    {
+        private readonly Dictionary<int, Solid> _hits = new Dictionary<int, Solid>();
+        private readonly HashSet<int> _misses = new HashSet<int>();
+
+        public int FetchCount { get; private set; }
+        public int HitCount { get; private set; }
+
+        public Solid Get(Part part)
+        {
+            if (part == null)
+            {
+                return null;
+            }
+
+            return Get(part.Identifier.ID, () => part.GetSolid());
+        }
+
+        public Solid Get(BoltGroup bolt)
+        {
+            if (bolt == null)
+            {
+                return null;
+            }
+
+            return Get(bolt.Identifier.ID, () => bolt.GetSolid());
+        }
+
+        private Solid Get(int id, Func<Solid> factory)
+        {
+            Solid cached;
+            if (_hits.TryGetValue(id, out cached))
+            {
+                HitCount++;
+                return cached;
+            }
+
+            if (_misses.Contains(id))
+            {
+                HitCount++;
+                return null;
+            }
+
+            FetchCount++;
+            Solid solid;
+            try
+            {
+                solid = factory();
+            }
+            catch
+            {
+                solid = null;
+            }
+
+            if (solid == null)
+            {
+                _misses.Add(id);
+                return null;
+            }
+
+            _hits[id] = solid;
+            return solid;
+        }
     }
 
     public static string Write(Model model, string outputDirectory)
@@ -50,10 +115,15 @@ internal static class BodyBracketBundleExporter
         var ordered = assemblies.OrderBy(assembly => assembly.Identifier.ID).ToList();
         var exported = new List<ExportedAssembly>();
         var exportWatch = Stopwatch.StartNew();
+        var solidFetchCount = 0;
+        var solidHitCount = 0;
         for (var i = 0; i < ordered.Count; i++)
         {
             var assembly = ordered[i];
-            var item = BuildAssemblyExport(model, assembly, bevelByFather);
+            var solids = new WorldSolidCache();
+            var item = BuildAssemblyExport(model, assembly, bevelByFather, solids);
+            solidFetchCount += solids.FetchCount;
+            solidHitCount += solids.HitCount;
             if (item != null)
             {
                 exported.Add(item);
@@ -98,13 +168,18 @@ internal static class BodyBracketBundleExporter
         summary.AppendLine("Assemblies: " + bundle.Assemblies.Count.ToString(CultureInfo.InvariantCulture));
         summary.AppendLine("Bevel index seconds: " + indexWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture));
         summary.AppendLine("Assembly export seconds: " + exportWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture));
+        summary.AppendLine("GetSolid fetched: " + solidFetchCount.ToString(CultureInfo.InvariantCulture));
+        summary.AppendLine("GetSolid cache hits: " + solidHitCount.ToString(CultureInfo.InvariantCulture));
         summary.AppendLine("Output: " + exportPath);
         File.WriteAllText(Path.Combine(outputDirectory, "README-body-bracket-export.txt"), summary.ToString(), Encoding.UTF8);
 
         Console.WriteLine(
             "Bundle 写出完成，装配导出+序列化 " +
             exportWatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
-            "s");
+            "s; GetSolid fetched " +
+            solidFetchCount.ToString(CultureInfo.InvariantCulture) +
+            ", cache hits " +
+            solidHitCount.ToString(CultureInfo.InvariantCulture));
         Console.Out.Flush();
         return exportPath;
     }
@@ -147,7 +222,8 @@ internal static class BodyBracketBundleExporter
     private static ExportedAssembly BuildAssemblyExport(
         Model model,
         Assembly assembly,
-        IReadOnlyDictionary<int, List<ModelObject>> bevelByFather)
+        IReadOnlyDictionary<int, List<ModelObject>> bevelByFather,
+        WorldSolidCache solids)
     {
         var mainPart = assembly.GetMainPart() as Part;
         if (mainPart == null)
@@ -159,14 +235,14 @@ internal static class BodyBracketBundleExporter
             .GroupBy(part => part.Identifier.ID)
             .ToDictionary(group => group.Key, group => group.First());
 
-        var memberAxisEvidence = BuildMemberAxisEvidence(model, mainPart);
+        var memberAxisEvidence = BuildMemberAxisEvidence(model, mainPart, solids);
         var partCaches = new Dictionary<int, PartObjectCache>();
         var exportedParts = new List<ExportedPart>();
         foreach (var part in parts.Values.OrderBy(item => item.Identifier.ID))
         {
             var cache = LoadPartObjectCache(part);
             partCaches[part.Identifier.ID] = cache;
-            var exported = BuildPartExport(model, part, memberAxisEvidence, bevelByFather, cache);
+            var exported = BuildPartExport(model, part, memberAxisEvidence, bevelByFather, cache, solids);
             if (exported != null)
             {
                 exportedParts.Add(exported);
@@ -175,8 +251,8 @@ internal static class BodyBracketBundleExporter
 
         ApplySegmentAdjacencyEvidence(exportedParts);
         var teklaPartList = parts.Values.ToList();
-        var boxSectionEvidence = BuildBoxSectionEvidence(teklaPartList, exportedParts, memberAxisEvidence);
-        var hBeamSectionEvidence = BuildHBeamSectionEvidence(teklaPartList, exportedParts, memberAxisEvidence);
+        var boxSectionEvidence = BuildBoxSectionEvidence(teklaPartList, exportedParts, memberAxisEvidence, solids);
+        var hBeamSectionEvidence = BuildHBeamSectionEvidence(teklaPartList, exportedParts, memberAxisEvidence, solids);
 
         return new ExportedAssembly
         {
@@ -221,7 +297,8 @@ internal static class BodyBracketBundleExporter
         Part part,
         ExportedMemberAxisEvidence memberAxisEvidence,
         IReadOnlyDictionary<int, List<ModelObject>> bevelByFather,
-        PartObjectCache cache)
+        PartObjectCache cache,
+        WorldSolidCache solids)
     {
         var runtimeType = MapRuntimeType(part);
         var profileString = part.Profile != null ? part.Profile.ProfileString ?? string.Empty : string.Empty;
@@ -236,7 +313,7 @@ internal static class BodyBracketBundleExporter
         var axisY = Normalize(ToVector(coordinateSystem.AxisY));
         var axisZ = Normalize(Cross(axisX, axisY));
 
-        var globalBox = GetGlobalBoundingBox(part);
+        var globalBox = GetGlobalBoundingBox(part, solids);
         var localBox = GetLocalBoundingBox(model, part, coordinateSystem);
         var thickness = ResolveThickness(part, profileString, localBox);
         var contourPoints = GetContourPoints(part, coordinateSystem, localBox, isPlateLike, isSpecialShape, thickness);
@@ -245,8 +322,8 @@ internal static class BodyBracketBundleExporter
         var weldStats = GetWeldStrengths(cache.Welds);
         var weldDetails = GetWeldDetails(cache.Welds);
         var booleanCounts = GetBooleanCounts(cache.Booleans);
-        var booleanCutDetails = GetBooleanCutDetails(cache.Booleans);
-        var boltHoles = GetBoltHoles(cache.Bolts);
+        var booleanCutDetails = GetBooleanCutDetails(cache.Booleans, solids);
+        var boltHoles = GetBoltHoles(cache.Bolts, solids);
         var partCoordSys = ToExportedCoordinateSystem(coordinateSystem);
         var center = GetCenter(globalBox);
 
@@ -287,6 +364,7 @@ internal static class BodyBracketBundleExporter
             globalBox,
             extraBevels,
             cache.Booleans,
+            solids,
             out booleanObjectTypes,
             out endChamferCount);
         var bevelCount = 0;
@@ -356,10 +434,10 @@ internal static class BodyBracketBundleExporter
         };
     }
 
-    private static ExportedMemberAxisEvidence BuildMemberAxisEvidence(Model model, Part mainPart)
+    private static ExportedMemberAxisEvidence BuildMemberAxisEvidence(Model model, Part mainPart, WorldSolidCache solids)
     {
         var coordinateSystem = mainPart.GetCoordinateSystem();
-        var globalBox = GetGlobalBoundingBox(mainPart);
+        var globalBox = GetGlobalBoundingBox(mainPart, solids);
         var localBox = GetLocalBoundingBox(model, mainPart, coordinateSystem);
         var axisX = Normalize(ToVector(coordinateSystem.AxisX));
         var axisY = Normalize(ToVector(coordinateSystem.AxisY));
@@ -509,7 +587,8 @@ internal static class BodyBracketBundleExporter
     private static ExportedBoxSectionEvidence BuildBoxSectionEvidence(
         IReadOnlyList<Part> teklaParts,
         IReadOnlyList<ExportedPart> exportedParts,
-        ExportedMemberAxisEvidence memberAxisEvidence)
+        ExportedMemberAxisEvidence memberAxisEvidence,
+        WorldSolidCache solids)
     {
         var byId = exportedParts.ToDictionary(part => part.PartId, part => part);
         var axisOrigin = ToPoint(memberAxisEvidence.Origin);
@@ -553,7 +632,7 @@ internal static class BodyBracketBundleExporter
                 {
                     continue;
                 }
-                var section = IntersectSolidFacesWithPlane(part, planeOrigin, axisDirection, axes.U, axes.V);
+                var section = IntersectSolidFacesWithPlane(part, planeOrigin, axisDirection, axes.U, axes.V, solids);
                 if (section.Points.Count == 0 && section.Segments.Count == 0)
                 {
                     continue;
@@ -669,7 +748,8 @@ internal static class BodyBracketBundleExporter
     private static ExportedHBeamSectionEvidence BuildHBeamSectionEvidence(
         IReadOnlyList<Part> teklaParts,
         IReadOnlyList<ExportedPart> exportedParts,
-        ExportedMemberAxisEvidence memberAxisEvidence)
+        ExportedMemberAxisEvidence memberAxisEvidence,
+        WorldSolidCache solids)
     {
         var axisOrigin = ToPoint(memberAxisEvidence.Origin);
         var axisDirection = Normalize(ToVector(memberAxisEvidence.Direction));
@@ -734,7 +814,7 @@ internal static class BodyBracketBundleExporter
                     continue;
                 }
 
-                var section = IntersectSolidFacesWithPlane(part, planeOrigin, axisDirection, axes.U, axes.V);
+                var section = IntersectSolidFacesWithPlane(part, planeOrigin, axisDirection, axes.U, axes.V, solids);
                 if (section.Points.Count == 0 && section.Segments.Count == 0)
                 {
                     continue;
@@ -1126,12 +1206,16 @@ internal static class BodyBracketBundleExporter
         public string Kind { get; set; } = string.Empty;
     }
 
-    private static SectionIntersectionResult IntersectSolidFacesWithPlane(Part part, Point planeOrigin, Vector planeNormal, Vector axisU, Vector axisV)
+    private static SectionIntersectionResult IntersectSolidFacesWithPlane(Part part, Point planeOrigin, Vector planeNormal, Vector axisU, Vector axisV, WorldSolidCache solids)
     {
         var result = new SectionIntersectionResult();
         try
         {
-            var solid = part.GetSolid();
+            var solid = solids.Get(part);
+            if (solid == null)
+            {
+                return result;
+            }
             var faceEnumerator = solid.GetFaceEnumerator();
             var faceIndex = 0;
             while (faceEnumerator.MoveNext())
@@ -2130,9 +2214,14 @@ internal static class BodyBracketBundleExporter
         return part.GetType().Name;
     }
 
-    private static GlobalBoundingBox GetGlobalBoundingBox(Part part)
+    private static GlobalBoundingBox GetGlobalBoundingBox(Part part, WorldSolidCache solids)
     {
-        var solid = part.GetSolid();
+        var solid = solids.Get(part);
+        if (solid == null)
+        {
+            return new GlobalBoundingBox(new Point(), new Point());
+        }
+
         return new GlobalBoundingBox(solid.MinimumPoint, solid.MaximumPoint);
     }
 
@@ -2143,6 +2232,7 @@ internal static class BodyBracketBundleExporter
         try
         {
             handler.SetCurrentTransformationPlane(new TransformationPlane(coordinateSystem));
+            // Local min/max are in the part work plane; do not reuse the world-CS cache.
             var solid = part.GetSolid();
             return new LocalBoundingBox(solid.MinimumPoint, solid.MaximumPoint);
         }
@@ -2279,7 +2369,7 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: 螺栓孔详情 ===
-    private static List<ExportedBoltHole> GetBoltHoles(IReadOnlyList<BoltGroup> bolts)
+    private static List<ExportedBoltHole> GetBoltHoles(IReadOnlyList<BoltGroup> bolts, WorldSolidCache solids)
     {
         var holes = new List<ExportedBoltHole>();
         var seen = new HashSet<int>();
@@ -2299,11 +2389,18 @@ internal static class BodyBracketBundleExporter
             Point pos;
             try
             {
-                var boltSolid = bolt.GetSolid();
-                pos = new Point(
-                    (boltSolid.MinimumPoint.X + boltSolid.MaximumPoint.X) / 2.0,
-                    (boltSolid.MinimumPoint.Y + boltSolid.MaximumPoint.Y) / 2.0,
-                    (boltSolid.MinimumPoint.Z + boltSolid.MaximumPoint.Z) / 2.0);
+                var boltSolid = solids.Get(bolt);
+                if (boltSolid == null)
+                {
+                    pos = new Point(0, 0, 0);
+                }
+                else
+                {
+                    pos = new Point(
+                        (boltSolid.MinimumPoint.X + boltSolid.MaximumPoint.X) / 2.0,
+                        (boltSolid.MinimumPoint.Y + boltSolid.MaximumPoint.Y) / 2.0,
+                        (boltSolid.MinimumPoint.Z + boltSolid.MaximumPoint.Z) / 2.0);
+                }
             }
             catch
             {
@@ -2366,7 +2463,7 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: Boolean切割详情 ===
-    private static List<ExportedBooleanCut> GetBooleanCutDetails(IReadOnlyList<BooleanPart> booleans)
+    private static List<ExportedBooleanCut> GetBooleanCutDetails(IReadOnlyList<BooleanPart> booleans, WorldSolidCache solids)
     {
         var details = new List<ExportedBooleanCut>();
         var seen = new HashSet<int>();
@@ -2386,7 +2483,11 @@ internal static class BodyBracketBundleExporter
             // 只导出Cut类型
             if (typeText.IndexOf("cut", StringComparison.OrdinalIgnoreCase) < 0) continue;
 
-            var opSolid = operativePart.GetSolid();
+            var opSolid = solids.Get(operativePart);
+            if (opSolid == null)
+            {
+                continue;
+            }
             details.Add(new ExportedBooleanCut
             {
                 OperativePartId = operativePart.Identifier.ID,
@@ -2495,6 +2596,7 @@ internal static class BodyBracketBundleExporter
         GlobalBoundingBox plateBox,
         List<ModelObject> extra,
         IReadOnlyList<BooleanPart> partBooleans,
+        WorldSolidCache solids,
         out List<string> objectTypes,
         out int endChamferCount)
     {
@@ -2568,7 +2670,8 @@ internal static class BodyBracketBundleExporter
                         longAxis,
                         isPlateLike,
                         thicknessCandidates,
-                        plateBox);
+                        plateBox,
+                        solids);
                     if (bevel != null)
                     {
                         details.Add(bevel);
@@ -2578,7 +2681,8 @@ internal static class BodyBracketBundleExporter
                         plateNormal,
                         longAxis,
                         thicknessCandidates,
-                        plateBox))
+                        plateBox,
+                        solids))
                     {
                         endChamferCount++;
                     }
@@ -2840,7 +2944,8 @@ internal static class BodyBracketBundleExporter
         Vector longAxis,
         bool isPlateLike,
         List<double> thicknesses,
-        GlobalBoundingBox plateBox)
+        GlobalBoundingBox plateBox,
+        WorldSolidCache solids)
     {
         Part operative;
         try
@@ -2861,7 +2966,12 @@ internal static class BodyBracketBundleExporter
         Point max;
         try
         {
-            var solid = operative.GetSolid();
+            var solid = solids.Get(operative);
+            if (solid == null)
+            {
+                return null;
+            }
+
             min = solid.MinimumPoint;
             max = solid.MaximumPoint;
         }
@@ -3013,7 +3123,8 @@ internal static class BodyBracketBundleExporter
         Vector plateNormal,
         Vector longAxis,
         List<double> thicknesses,
-        GlobalBoundingBox plateBox)
+        GlobalBoundingBox plateBox,
+        WorldSolidCache solids)
     {
         Part operative;
         try
@@ -3034,7 +3145,12 @@ internal static class BodyBracketBundleExporter
         Point max;
         try
         {
-            var solid = operative.GetSolid();
+            var solid = solids.Get(operative);
+            if (solid == null)
+            {
+                return false;
+            }
+
             min = solid.MinimumPoint;
             max = solid.MaximumPoint;
         }
