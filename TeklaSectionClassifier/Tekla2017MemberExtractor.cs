@@ -11,7 +11,6 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
     private readonly Model _model;
     private readonly ExtractionOptions _options;
     private readonly ISectionSampler _sectionSampler;
-    private readonly Dictionary<int, object?> _worldSolids = new Dictionary<int, object?>();
 
     public Tekla2017MemberExtractor(Model model, ExtractionOptions options, ISectionSampler sectionSampler)
     {
@@ -97,7 +96,6 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
 
     private MemberSnapshot? TryExtractAssembly(Assembly assembly)
     {
-        _worldSolids.Clear();
         var assemblyMainPart = assembly.GetMainPart() as Part;
         if (assemblyMainPart == null)
         {
@@ -234,28 +232,14 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
         };
     }
 
-    private object? SafeGetSolid(Part part)
+    private static object? SafeGetSolid(Part part)
     {
-        if (part == null)
-        {
-            return null;
-        }
-
-        var id = part.Identifier.ID;
-        if (_worldSolids.TryGetValue(id, out var cached))
-        {
-            return cached;
-        }
-
         try
         {
-            var solid = part.GetSolid();
-            _worldSolids[id] = solid;
-            return solid;
+            return part.GetSolid();
         }
         catch
         {
-            _worldSolids[id] = null;
             return null;
         }
     }
@@ -398,7 +382,7 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
             : 0.0;
     }
 
-    private (double? Value, string Source, string Detail) ResolveThicknessInfo(Part part, string profileString)
+    private static (double? Value, string Source, string Detail) ResolveThicknessInfo(Part part, string profileString)
     {
         if (TryGetDoubleReportProperty(part, "DIM_A") is double dimA && dimA > 0)
         {
@@ -643,32 +627,11 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
         return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
-    private AxisDefinition BuildAxisDefinition(Part part)
+    private static AxisDefinition BuildAxisDefinition(Part part)
     {
-        var solid = SafeGetSolid(part);
-        if (solid == null)
-        {
-            return new AxisDefinition
-            {
-                Origin = new Point3D(0, 0, 0),
-                Direction = new Vector3D(1, 0, 0),
-                Length = 0.0
-            };
-        }
-
-        var typed = solid as Solid;
-        if (typed == null)
-        {
-            return new AxisDefinition
-            {
-                Origin = new Point3D(0, 0, 0),
-                Direction = new Vector3D(1, 0, 0),
-                Length = 0.0
-            };
-        }
-
-        var min = ToPoint3D(typed.MinimumPoint);
-        var max = ToPoint3D(typed.MaximumPoint);
+        var solid = part.GetSolid();
+        var min = ToPoint3D(solid.MinimumPoint);
+        var max = ToPoint3D(solid.MaximumPoint);
         var corners = GetBoundingBoxCorners(min, max);
 
         try
@@ -779,7 +742,7 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
 
         return new Vector3D(vector.X / length, vector.Y / length, vector.Z / length);
     }
-    private BoundingBox3D BuildBoundingBox(Part part)
+    private static BoundingBox3D BuildBoundingBox(Part part)
     {
         var solid = SafeGetSolid(part);
         return solid != null ? BuildBoundingBox(solid) : new BoundingBox3D();
