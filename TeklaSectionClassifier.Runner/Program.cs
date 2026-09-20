@@ -317,9 +317,7 @@ internal static class Program
             ? item.Metadata.HBeamSectionEvidence.StationFrames
             : null;
         var hasHFrames = hFrames != null && hFrames.Count > 0;
-        // Box section evidence also fires on many H beams. Only overlay when
-        // exactly one of the two bundle hints is present.
-        if (hasClosedBox == hasHFrames)
+        if (!hasClosedBox && !hasHFrames)
         {
             return;
         }
