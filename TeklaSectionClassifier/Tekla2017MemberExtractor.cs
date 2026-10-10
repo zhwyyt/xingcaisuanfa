@@ -122,14 +122,43 @@ public sealed class Tekla2017MemberExtractor : IMemberExtractor
             snapshot.Parts.Add(BuildPartSnapshot(part, snapshot.Member.MainAxis));
         }
 
-        var longitudinalAxis = BuildLongitudinalAxis(snapshot.Parts, snapshot.Member.MainAxis);
-        snapshot.LongitudinalAxisKind = longitudinalAxis.Kind;
-        snapshot.GuidePolyline = longitudinalAxis.GuidePolyline;
-        snapshot.AxisSegments = longitudinalAxis.AxisSegments;
-        snapshot.LongitudinalAxisConfidence = longitudinalAxis.Confidence;
-        snapshot.LongitudinalAxisSource = longitudinalAxis.Source;
+        var resolved = AlignedSpanMemberAxis.Resolve(AlignedSpanMemberAxis.FromSnapshots(snapshot.Parts));
+        if (resolved.HasAxis)
+        {
+            ApplyAlignedSpanAxis(snapshot, resolved);
+        }
+        else
+        {
+            var longitudinalAxis = BuildLongitudinalAxis(snapshot.Parts, snapshot.Member.MainAxis);
+            snapshot.LongitudinalAxisKind = longitudinalAxis.Kind;
+            snapshot.GuidePolyline = longitudinalAxis.GuidePolyline;
+            snapshot.AxisSegments = longitudinalAxis.AxisSegments;
+            snapshot.LongitudinalAxisConfidence = longitudinalAxis.Confidence;
+            snapshot.LongitudinalAxisSource = longitudinalAxis.Source;
+        }
 
         return snapshot;
+    }
+
+    private static void ApplyAlignedSpanAxis(MemberSnapshot snapshot, AlignedSpanAxisResult resolved)
+    {
+        snapshot.Member.MainAxis = resolved.Axis;
+        foreach (var part in snapshot.Parts)
+        {
+            var projection = BuildAxisProjection(part.BoundingBox, resolved.Axis);
+            part.AxisProjection = projection;
+            part.EndProximity = new EndProximity
+            {
+                NearStart = projection.Start <= resolved.Axis.Length * 0.05,
+                NearEnd = projection.End >= resolved.Axis.Length * 0.95
+            };
+        }
+
+        snapshot.LongitudinalAxisKind = resolved.Kind;
+        snapshot.GuidePolyline = resolved.GuidePolyline;
+        snapshot.AxisSegments = resolved.Segments;
+        snapshot.LongitudinalAxisConfidence = resolved.Confidence;
+        snapshot.LongitudinalAxisSource = resolved.Source;
     }
 
     private MemberIdentity BuildMemberIdentity(Assembly assembly, Part mainPart, AxisDefinition mainAxis, string memberId)

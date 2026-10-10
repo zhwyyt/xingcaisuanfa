@@ -29,7 +29,7 @@ internal sealed class ExportSourceInfo
     public string SelectionMode { get; set; } = "selected";
 
     [DataMember(Name = "exporterVersion", Order = 3)]
-    public string ExporterVersion { get; set; } = "xingcai-runner-body-bracket-0.3.3-index-once";
+    public string ExporterVersion { get; set; } = "xingcai-runner-body-bracket-0.3.3-aligned-span-axis";
 }
 
 [DataContract]
@@ -68,6 +68,65 @@ internal sealed class ExportedAssemblyMetadata
 
     [DataMember(Name = "hBeamSectionEvidence", EmitDefaultValue = false, Order = 5)]
     public ExportedHBeamSectionEvidence HBeamSectionEvidence { get; set; } = new ExportedHBeamSectionEvidence();
+
+    [DataMember(Name = "externalConnectionEvidence", EmitDefaultValue = false, Order = 6)]
+    public ExportedExternalConnectionEvidence ExternalConnectionEvidence { get; set; } = new ExportedExternalConnectionEvidence();
+}
+
+[DataContract]
+internal sealed class ExportedExternalConnectionEvidence
+{
+    [DataMember(Name = "source", EmitDefaultValue = false, Order = 1)]
+    public string Source { get; set; } = string.Empty;
+
+    [DataMember(Name = "axisLocationToleranceMm", Order = 2)]
+    public double AxisLocationToleranceMm { get; set; }
+
+    [DataMember(Name = "axisLocationLengthRatio", Order = 3)]
+    public double AxisLocationLengthRatio { get; set; }
+
+    [DataMember(Name = "links", EmitDefaultValue = false, Order = 4)]
+    public List<ExportedExternalPartLink> Links { get; set; } = new List<ExportedExternalPartLink>();
+
+    [DataMember(Name = "diagnostics", EmitDefaultValue = false, Order = 5)]
+    public List<string> Diagnostics { get; set; } = new List<string>();
+}
+
+[DataContract]
+internal sealed class ExportedExternalPartLink
+{
+    [DataMember(Name = "localPartId", Order = 1)]
+    public int LocalPartId { get; set; }
+
+    [DataMember(Name = "otherPartId", Order = 2)]
+    public int OtherPartId { get; set; }
+
+    [DataMember(Name = "otherAssemblyId", Order = 3)]
+    public int OtherAssemblyId { get; set; }
+
+    [DataMember(Name = "relation", Order = 4)]
+    public string Relation { get; set; } = string.Empty;
+
+    [DataMember(Name = "shopOrSite", EmitDefaultValue = false, Order = 5)]
+    public string ShopOrSite { get; set; } = string.Empty;
+
+    [DataMember(Name = "axisLocation", EmitDefaultValue = false, Order = 6)]
+    public string AxisLocation { get; set; } = string.Empty;
+
+    [DataMember(Name = "axisStation", Order = 7)]
+    public double AxisStation { get; set; }
+
+    [DataMember(Name = "boltSize", EmitDefaultValue = false, Order = 8)]
+    public double BoltSize { get; set; }
+
+    [DataMember(Name = "otherMainPartId", EmitDefaultValue = false, Order = 9)]
+    public int OtherMainPartId { get; set; }
+
+    [DataMember(Name = "otherAxisDirection", EmitDefaultValue = false, Order = 10)]
+    public ExportedVector3 OtherAxisDirection { get; set; } = new ExportedVector3();
+
+    [DataMember(Name = "otherAxisPose", EmitDefaultValue = false, Order = 11)]
+    public string OtherAxisPose { get; set; } = string.Empty;
 }
 
 
@@ -741,6 +800,12 @@ internal sealed class ExportedBooleanCut
 
     [DataMember(Name = "boundingBox", Order = 3)]
     public ExportedBoundingBox BoundingBox { get; set; } = new ExportedBoundingBox();
+
+    [DataMember(Name = "cutsFatherSolid", Order = 4)]
+    public bool CutsFatherSolid { get; set; }
+
+    [DataMember(Name = "cutProof", EmitDefaultValue = false, Order = 5)]
+    public string CutProof { get; set; } = string.Empty;
 }
 
 [DataContract]
@@ -805,6 +870,12 @@ internal sealed class ExportedEdgeBevel
 
     [DataMember(Name = "boundingBox", EmitDefaultValue = false, Order = 20)]
     public ExportedBoundingBox BoundingBox { get; set; } = new ExportedBoundingBox();
+
+    [DataMember(Name = "cutsFatherSolid", Order = 21)]
+    public bool CutsFatherSolid { get; set; }
+
+    [DataMember(Name = "cutProof", EmitDefaultValue = false, Order = 22)]
+    public string CutProof { get; set; } = string.Empty;
 }
 
 

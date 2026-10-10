@@ -14,7 +14,7 @@ namespace TeklaSectionClassifier.Runner;
 
 internal static class BodyBracketBundleExporter
 {
-    private const string ExporterVersion = "xingcai-runner-body-bracket-0.3.3-index-once";
+    private const string ExporterVersion = "xingcai-runner-body-bracket-0.3.3-aligned-span-axis";
 
     private sealed class PartObjectCache
     {
@@ -159,7 +159,7 @@ internal static class BodyBracketBundleExporter
             .GroupBy(part => part.Identifier.ID)
             .ToDictionary(group => group.Key, group => group.First());
 
-        var memberAxisEvidence = BuildMemberAxisEvidence(model, mainPart);
+        var memberAxisEvidence = BuildMemberAxisEvidence(parts.Values.ToList(), mainPart);
         var partCaches = new Dictionary<int, PartObjectCache>();
         var exportedParts = new List<ExportedPart>();
         foreach (var part in parts.Values.OrderBy(item => item.Identifier.ID))
@@ -190,7 +190,8 @@ internal static class BodyBracketBundleExporter
                 MainPartName = mainPart.Name ?? string.Empty,
                 MemberAxisEvidence = memberAxisEvidence,
                 BoxSectionEvidence = boxSectionEvidence,
-                HBeamSectionEvidence = hBeamSectionEvidence
+                HBeamSectionEvidence = hBeamSectionEvidence,
+                ExternalConnectionEvidence = BuildExternalConnectionEvidence(model, parts, partCaches, memberAxisEvidence)
             }
         };
     }
@@ -245,7 +246,7 @@ internal static class BodyBracketBundleExporter
         var weldStats = GetWeldStrengths(cache.Welds);
         var weldDetails = GetWeldDetails(cache.Welds);
         var booleanCounts = GetBooleanCounts(cache.Booleans);
-        var booleanCutDetails = GetBooleanCutDetails(cache.Booleans);
+        var booleanCutDetails = GetBooleanCutDetails(part, cache.Booleans);
         var boltHoles = GetBoltHoles(cache.Bolts);
         var partCoordSys = ToExportedCoordinateSystem(coordinateSystem);
         var center = GetCenter(globalBox);
@@ -356,30 +357,41 @@ internal static class BodyBracketBundleExporter
         };
     }
 
-    private static ExportedMemberAxisEvidence BuildMemberAxisEvidence(Model model, Part mainPart)
+    private static ExportedMemberAxisEvidence BuildMemberAxisEvidence(
+        IReadOnlyCollection<Part> parts,
+        Part fallbackPart)
     {
-        var coordinateSystem = mainPart.GetCoordinateSystem();
-        var globalBox = GetGlobalBoundingBox(mainPart);
-        var localBox = GetLocalBoundingBox(model, mainPart, coordinateSystem);
-        var axisX = Normalize(ToVector(coordinateSystem.AxisX));
-        var axisY = Normalize(ToVector(coordinateSystem.AxisY));
-        var lengthX = Math.Abs(localBox.Max.X - localBox.Min.X);
-        var lengthY = Math.Abs(localBox.Max.Y - localBox.Min.Y);
-        var useXAsAxis = lengthX >= lengthY;
-        var direction = useXAsAxis ? axisX : axisY;
-        var length = Math.Max(lengthX, lengthY);
-        var center = GetCenter(globalBox);
-        var origin = new Point(
-            center.X - (direction.X * length / 2.0),
-            center.Y - (direction.Y * length / 2.0),
-            center.Z - (direction.Z * length / 2.0));
+        var samples = new List<AlignedSpanPartInput>();
+        foreach (var part in parts)
+        {
+            var sample = TeklaPartAxisSampler.TryRead(part);
+            if (sample != null)
+            {
+                samples.Add(sample);
+            }
+        }
+
+        if (samples.Count == 0 && fallbackPart != null)
+        {
+            var sample = TeklaPartAxisSampler.TryRead(fallbackPart);
+            if (sample != null)
+            {
+                samples.Add(sample);
+            }
+        }
+
+        var resolved = AlignedSpanMemberAxis.Resolve(samples);
+        if (!resolved.HasAxis)
+        {
+            return new ExportedMemberAxisEvidence { Source = AlignedSpanMemberAxis.SourceName };
+        }
 
         return new ExportedMemberAxisEvidence
         {
-            Origin = ToExportedVector3(origin),
-            Direction = ToExportedVector3(direction),
-            Length = Math.Round(length, 6),
-            Source = "mainPart.longestLocalAxis"
+            Origin = ToExportedVector3(new Point(resolved.Axis.Origin.X, resolved.Axis.Origin.Y, resolved.Axis.Origin.Z)),
+            Direction = ToExportedVector3(new Vector(resolved.Axis.Direction.X, resolved.Axis.Direction.Y, resolved.Axis.Direction.Z)),
+            Length = Math.Round(Math.Max(0.0, resolved.Axis.Length), 6),
+            Source = resolved.Source
         };
     }
 
@@ -1643,6 +1655,312 @@ internal static class BodyBracketBundleExporter
 
         return radial.Z >= 0 ? "RADIAL_Z_POS" : "RADIAL_Z_NEG";
     }
+    private static ExportedExternalConnectionEvidence BuildExternalConnectionEvidence(
+        Model model,
+        IReadOnlyDictionary<int, Part> localParts,
+        IReadOnlyDictionary<int, PartObjectCache> partCaches,
+        ExportedMemberAxisEvidence memberAxisEvidence)
+    {
+        const double axisLocationToleranceMm = 50.0;
+        const double axisLocationLengthRatio = 0.15;
+        var links = new List<ExportedExternalPartLink>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var diagnostics = new List<string>();
+        var axisOrigin = ToPoint(memberAxisEvidence.Origin);
+        var axisDirection = Normalize(ToVector(memberAxisEvidence.Direction));
+        var axisLength = memberAxisEvidence.Length;
+
+        foreach (var part in localParts.Values)
+        {
+            PartObjectCache cache;
+            if (partCaches == null || !partCaches.TryGetValue(part.Identifier.ID, out cache))
+            {
+                continue;
+            }
+
+            foreach (var weld in cache.Welds)
+            {
+                AddExternalWeldLink(model, part, weld, localParts, axisOrigin, axisDirection, axisLength, axisLocationToleranceMm, axisLocationLengthRatio, seen, links, diagnostics);
+            }
+
+            foreach (var bolt in cache.Bolts)
+            {
+                AddExternalBoltLinks(model, part, bolt, localParts, axisOrigin, axisDirection, axisLength, axisLocationToleranceMm, axisLocationLengthRatio, seen, links, diagnostics);
+            }
+        }
+
+        return new ExportedExternalConnectionEvidence
+        {
+            Source = "part.weld-and-bolt.other-assembly",
+            AxisLocationToleranceMm = axisLocationToleranceMm,
+            AxisLocationLengthRatio = axisLocationLengthRatio,
+            Links = links
+                .OrderBy(item => item.LocalPartId)
+                .ThenBy(item => item.OtherAssemblyId)
+                .ThenBy(item => item.OtherPartId)
+                .ThenBy(item => item.Relation, StringComparer.Ordinal)
+                .ToList(),
+            Diagnostics = diagnostics
+        };
+    }
+
+    private static void AddExternalWeldLink(
+        Model model,
+        Part localPart,
+        BaseWeld weld,
+        IReadOnlyDictionary<int, Part> localParts,
+        Point axisOrigin,
+        Vector axisDirection,
+        double axisLength,
+        double toleranceMm,
+        double lengthRatio,
+        HashSet<string> seen,
+        List<ExportedExternalPartLink> links,
+        List<string> diagnostics)
+    {
+        if (weld == null)
+        {
+            return;
+        }
+
+        var main = weld.MainObject as Part;
+        var secondary = weld.SecondaryObject as Part;
+        if (main == null || secondary == null)
+        {
+            diagnostics.Add("external-weld-unresolved:" + SafeGetIdentifier(weld).ToString(CultureInfo.InvariantCulture));
+            return;
+        }
+
+        var other = localParts.ContainsKey(main.Identifier.ID) ? secondary : main;
+        if (localParts.ContainsKey(main.Identifier.ID) && localParts.ContainsKey(secondary.Identifier.ID))
+        {
+            return;
+        }
+
+        if (localParts.ContainsKey(other.Identifier.ID))
+        {
+            return;
+        }
+
+        var otherAssemblyId = TryGetAssemblyId(other);
+        if (otherAssemblyId == 0)
+        {
+            diagnostics.Add("external-weld-no-assembly:" + other.Identifier.ID.ToString(CultureInfo.InvariantCulture));
+            return;
+        }
+
+        var key = string.Format(
+            CultureInfo.InvariantCulture,
+            "Weld:{0}:{1}:{2}",
+            localPart.Identifier.ID,
+            other.Identifier.ID,
+            otherAssemblyId);
+        if (!seen.Add(key))
+        {
+            return;
+        }
+
+        var location = ResolveAxisLocation(localPart, axisOrigin, axisDirection, axisLength, toleranceMm, lengthRatio);
+        var otherAxis = TryGetAssemblyAxis(model, other, diagnostics);
+        links.Add(new ExportedExternalPartLink
+        {
+            LocalPartId = localPart.Identifier.ID,
+            OtherPartId = other.Identifier.ID,
+            OtherAssemblyId = otherAssemblyId,
+            Relation = "Weld",
+            ShopOrSite = weld.ShopWeld ? "shop" : "site",
+            AxisLocation = location.Location,
+            AxisStation = location.Station,
+            OtherMainPartId = otherAxis.MainPartId,
+            OtherAxisDirection = otherAxis.Direction,
+            OtherAxisPose = otherAxis.Pose
+        });
+    }
+
+    private static void AddExternalBoltLinks(
+        Model model,
+        Part localPart,
+        BoltGroup bolt,
+        IReadOnlyDictionary<int, Part> localParts,
+        Point axisOrigin,
+        Vector axisDirection,
+        double axisLength,
+        double toleranceMm,
+        double lengthRatio,
+        HashSet<string> seen,
+        List<ExportedExternalPartLink> links,
+        List<string> diagnostics)
+    {
+        if (bolt == null)
+        {
+            return;
+        }
+
+        var connected = new List<Part>();
+        if (bolt.PartToBoltTo != null)
+        {
+            connected.Add(bolt.PartToBoltTo);
+        }
+
+        if (bolt.PartToBeBolted != null)
+        {
+            connected.Add(bolt.PartToBeBolted);
+        }
+
+        var others = bolt.OtherPartsToBolt;
+        if (others != null)
+        {
+            foreach (var item in others)
+            {
+                var otherPart = item as Part;
+                if (otherPart != null)
+                {
+                    connected.Add(otherPart);
+                }
+            }
+        }
+
+        if (connected.Count == 0)
+        {
+            diagnostics.Add("external-bolt-unresolved:" + SafeGetIdentifier(bolt).ToString(CultureInfo.InvariantCulture));
+            return;
+        }
+
+        var external = connected
+            .Where(part => part != null && !localParts.ContainsKey(part.Identifier.ID))
+            .GroupBy(part => part.Identifier.ID)
+            .Select(group => group.First())
+            .ToList();
+        if (external.Count == 0 || !connected.Any(part => localParts.ContainsKey(part.Identifier.ID)))
+        {
+            return;
+        }
+
+        var location = ResolveAxisLocation(localPart, axisOrigin, axisDirection, axisLength, toleranceMm, lengthRatio);
+        foreach (var other in external)
+        {
+            var otherAssemblyId = TryGetAssemblyId(other);
+            if (otherAssemblyId == 0)
+            {
+                diagnostics.Add("external-bolt-no-assembly:" + other.Identifier.ID.ToString(CultureInfo.InvariantCulture));
+                continue;
+            }
+
+            var key = string.Format(
+                CultureInfo.InvariantCulture,
+                "Bolt:{0}:{1}:{2}",
+                localPart.Identifier.ID,
+                other.Identifier.ID,
+                otherAssemblyId);
+            if (!seen.Add(key))
+            {
+                continue;
+            }
+
+            var otherAxis = TryGetAssemblyAxis(model, other, diagnostics);
+            links.Add(new ExportedExternalPartLink
+            {
+                LocalPartId = localPart.Identifier.ID,
+                OtherPartId = other.Identifier.ID,
+                OtherAssemblyId = otherAssemblyId,
+                Relation = "Bolt",
+                ShopOrSite = bolt.Bolt ? "site" : "shop",
+                AxisLocation = location.Location,
+                AxisStation = location.Station,
+                BoltSize = Math.Round(bolt.BoltSize, 3),
+                OtherMainPartId = otherAxis.MainPartId,
+                OtherAxisDirection = otherAxis.Direction,
+                OtherAxisPose = otherAxis.Pose
+            });
+        }
+    }
+
+    private static (int MainPartId, ExportedVector3 Direction, string Pose) TryGetAssemblyAxis(
+        Model model,
+        Part part,
+        List<string> diagnostics)
+    {
+        try
+        {
+            var assembly = part.GetAssembly();
+            var mainPart = assembly != null ? assembly.GetMainPart() as Part : null;
+            if (mainPart == null)
+            {
+                return (0, new ExportedVector3(), "unknown");
+            }
+
+            var assemblyParts = assembly != null ? GetAssemblyParts(assembly).ToList() : new List<Part>();
+            var axis = BuildMemberAxisEvidence(assemblyParts, mainPart);
+            return (mainPart.Identifier.ID, axis.Direction, PoseOf(axis.Direction));
+        }
+        catch
+        {
+            diagnostics.Add("external-axis-unresolved:" + part.Identifier.ID.ToString(CultureInfo.InvariantCulture));
+            return (0, new ExportedVector3(), "unknown");
+        }
+    }
+
+    private static string PoseOf(ExportedVector3 direction)
+    {
+        var length = Math.Sqrt((direction.X * direction.X) + (direction.Y * direction.Y) + (direction.Z * direction.Z));
+        if (length <= 1e-9)
+        {
+            return "unknown";
+        }
+
+        var absZ = Math.Abs(direction.Z / length);
+        if (absZ >= Math.Cos(10.0 * Math.PI / 180.0))
+        {
+            return "vertical";
+        }
+
+        if (absZ <= Math.Sin(10.0 * Math.PI / 180.0))
+        {
+            return "horizontal";
+        }
+
+        return "inclined";
+    }
+
+    private static int TryGetAssemblyId(Part part)
+    {
+        try
+        {
+            var assembly = part.GetAssembly();
+            return assembly != null ? assembly.Identifier.ID : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static (string Location, double Station) ResolveAxisLocation(
+        Part part,
+        Point axisOrigin,
+        Vector axisDirection,
+        double axisLength,
+        double toleranceMm,
+        double lengthRatio)
+    {
+        var box = GetGlobalBoundingBox(part);
+        var center = GetCenter(box);
+        var offset = new Vector(center.X - axisOrigin.X, center.Y - axisOrigin.Y, center.Z - axisOrigin.Z);
+        var station = Dot(offset, axisDirection);
+        var endBand = Math.Max(toleranceMm, axisLength * lengthRatio);
+        var location = "middle";
+        if (station <= endBand)
+        {
+            location = "start";
+        }
+        else if (station >= axisLength - endBand)
+        {
+            location = "end";
+        }
+
+        return (location, Math.Round(station, 3));
+    }
+
     private static List<ExportedRelationship> BuildRelationships(
         IReadOnlyList<Part> parts,
         IReadOnlyList<ExportedPart> exportedParts,
@@ -2366,7 +2684,7 @@ internal static class BodyBracketBundleExporter
     }
 
     // === 新增方法: Boolean切割详情 ===
-    private static List<ExportedBooleanCut> GetBooleanCutDetails(IReadOnlyList<BooleanPart> booleans)
+    private static List<ExportedBooleanCut> GetBooleanCutDetails(Part father, IReadOnlyList<BooleanPart> booleans)
     {
         var details = new List<ExportedBooleanCut>();
         var seen = new HashSet<int>();
@@ -2375,6 +2693,7 @@ internal static class BodyBracketBundleExporter
             return details;
         }
 
+        var fatherRaw = TryGetRawSolid(father);
         foreach (var booleanPart in booleans)
         {
             if (booleanPart == null || !seen.Add(booleanPart.Identifier.ID)) continue;
@@ -2386,16 +2705,32 @@ internal static class BodyBracketBundleExporter
             // 只导出Cut类型
             if (typeText.IndexOf("cut", StringComparison.OrdinalIgnoreCase) < 0) continue;
 
-            var opSolid = operativePart.GetSolid();
+            Point min;
+            Point max;
+            try
+            {
+                var opSolid = operativePart.GetSolid();
+                min = opSolid.MinimumPoint;
+                max = opSolid.MaximumPoint;
+            }
+            catch
+            {
+                continue;
+            }
+
+            string proof;
+            var cutsFather = CutterRemovesMaterial(fatherRaw, operativePart, out proof);
             details.Add(new ExportedBooleanCut
             {
                 OperativePartId = operativePart.Identifier.ID,
                 CutType = typeText,
                 BoundingBox = new ExportedBoundingBox
                 {
-                    Min = ToExportedVector3(opSolid.MinimumPoint),
-                    Max = ToExportedVector3(opSolid.MaximumPoint)
-                }
+                    Min = ToExportedVector3(min),
+                    Max = ToExportedVector3(max)
+                },
+                CutsFatherSolid = cutsFather,
+                CutProof = proof
             });
         }
 
@@ -2505,6 +2840,7 @@ internal static class BodyBracketBundleExporter
         var objects = new List<ModelObject>();
         endChamferCount = 0;
 
+        var fatherRaw = TryGetRawSolid(part);
         if (partBooleans != null)
         {
             foreach (var booleanPart in partBooleans)
@@ -2564,6 +2900,7 @@ internal static class BodyBracketBundleExporter
                 {
                     var bevel = FromBooleanCutIfBevel(
                         booleanPart,
+                        fatherRaw,
                         plateNormal,
                         longAxis,
                         isPlateLike,
@@ -2575,6 +2912,7 @@ internal static class BodyBracketBundleExporter
                     }
                     else if (!isPlateLike && IsBooleanCutEndChamfer(
                         booleanPart,
+                        fatherRaw,
                         plateNormal,
                         longAxis,
                         thicknessCandidates,
@@ -2658,6 +2996,107 @@ internal static class BodyBracketBundleExporter
         catch
         {
             return null;
+        }
+    }
+
+    private static Tekla.Structures.Model.Solid TryGetRawSolid(Part part)
+    {
+        if (part == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return part.GetSolid(Tekla.Structures.Model.Solid.SolidCreationTypeEnum.RAW);
+        }
+        catch
+        {
+            try
+            {
+                return part.GetSolid();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
+    private static bool CutterRemovesMaterial(Tekla.Structures.Model.Solid fatherRaw, Part operative, out string proof)
+    {
+        proof = "SOLID_UNAVAILABLE";
+        if (fatherRaw == null || operative == null)
+        {
+            return false;
+        }
+
+        Tekla.Structures.Model.Solid cutter;
+        try
+        {
+            cutter = operative.GetSolid();
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (cutter == null)
+        {
+            return false;
+        }
+
+        if (!SolidAabbsOverlap(fatherRaw, cutter))
+        {
+            proof = "AABB_MISS";
+            return false;
+        }
+
+        try
+        {
+            var shells = fatherRaw.GetCutPart(cutter);
+            while (shells != null && shells.MoveNext())
+            {
+                var shell = shells.Current as Tekla.Structures.Solid.Shell;
+                if (shell == null)
+                {
+                    continue;
+                }
+
+                var faces = shell.GetFaceEnumerator();
+                if (faces != null && faces.MoveNext() && faces.Current != null)
+                {
+                    proof = "GET_CUT_PART";
+                    return true;
+                }
+            }
+
+            proof = "NO_SHELL";
+            return false;
+        }
+        catch
+        {
+            proof = "GET_CUT_PART_FAILED";
+            return false;
+        }
+    }
+
+    private static bool SolidAabbsOverlap(Tekla.Structures.Model.Solid left, Tekla.Structures.Model.Solid right)
+    {
+        const double margin = 0.5;
+        try
+        {
+            var leftMin = left.MinimumPoint;
+            var leftMax = left.MaximumPoint;
+            var rightMin = right.MinimumPoint;
+            var rightMax = right.MaximumPoint;
+            return leftMin.X <= rightMax.X + margin && leftMax.X >= rightMin.X - margin
+                && leftMin.Y <= rightMax.Y + margin && leftMax.Y >= rightMin.Y - margin
+                && leftMin.Z <= rightMax.Z + margin && leftMax.Z >= rightMin.Z - margin;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -2836,6 +3275,7 @@ internal static class BodyBracketBundleExporter
 
     private static ExportedEdgeBevel FromBooleanCutIfBevel(
         BooleanPart booleanPart,
+        Tekla.Structures.Model.Solid fatherRaw,
         Vector plateNormal,
         Vector longAxis,
         bool isPlateLike,
@@ -2870,6 +3310,13 @@ internal static class BodyBracketBundleExporter
             return null;
         }
 
+        string proof;
+        var cutsFather = CutterRemovesMaterial(fatherRaw, operative, out proof);
+        if (!cutsFather)
+        {
+            return null;
+        }
+
         var cutBox = new GlobalBoundingBox(min, max);
         if (!IsBooleanCutBevel(plateBox, cutBox, plateNormal, longAxis, isPlateLike, thicknesses))
         {
@@ -2891,7 +3338,9 @@ internal static class BodyBracketBundleExporter
             {
                 Min = ToExportedVector3(min),
                 Max = ToExportedVector3(max)
-            }
+            },
+            CutsFatherSolid = true,
+            CutProof = proof
         };
     }
 
@@ -3010,6 +3459,7 @@ internal static class BodyBracketBundleExporter
 
     private static bool IsBooleanCutEndChamfer(
         BooleanPart booleanPart,
+        Tekla.Structures.Model.Solid fatherRaw,
         Vector plateNormal,
         Vector longAxis,
         List<double> thicknesses,
@@ -3026,6 +3476,12 @@ internal static class BodyBracketBundleExporter
         }
 
         if (operative == null)
+        {
+            return false;
+        }
+
+        string proof;
+        if (!CutterRemovesMaterial(fatherRaw, operative, out proof))
         {
             return false;
         }

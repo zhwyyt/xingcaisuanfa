@@ -91,3 +91,7 @@ dotnet run --project .\TeklaSectionClassifier.Runner\TeklaSectionClassifier.Runn
 - 覆盖更新每个 `member_*.json` 中的 `Classification`
 - 在同目录生成 `classification_summary.csv`
 - 在同目录生成 `classification_summary.json`
+
+## 2026-10-10 已验收识别基线
+
+构件主轴使用 `AlignedSpanMemberAxis`，source=`assemblyParts.alignedSpanCentroid`；已验收源码保存于 `feat/accepted-recognition-axis`。见 [主轴与连接导出基线](docs/verification/2026-10-10-accepted-recognition-axis.md)。识别三类主线在 `I:\\zijinhuatekla`，零件出图仍独立开发。
